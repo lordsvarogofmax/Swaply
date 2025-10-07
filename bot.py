@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import threading  # добавь в импорты, если ещё не там
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-# === Состояния диалога (обязательно до использования) ===
+# === Состояния диалога ===
 START, QUERY, CITY, EXCHANGE, PAYMENT = range(5)
 
 # === Логирование ===
@@ -129,6 +128,7 @@ async def generate_avito_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     full_query = " ".join(search_terms)
     safe_query = full_query.replace(" ", "+")
+    # ⚠️ ИСПРАВЛЕНО: убраны лишние пробелы в URL!
     avito_url = f"https://www.avito.ru/{city_code}?q={safe_query}&s=104"
 
     message = (
@@ -172,18 +172,7 @@ conv_handler = ConversationHandler(
 
 application.add_handler(conv_handler)
 
-_webhook_set = threading.Event()
-
-@app.before_request
-def setup_webhook_once():
-    if not _webhook_set.is_set():
-        with app.app_context():
-            render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
-            webhook_url = f"{render_url}/{BOT_TOKEN}"
-            asyncio.run(application.bot.set_webhook(url=webhook_url))
-            logging.info(f"Webhook установлен: {webhook_url}")
-            _webhook_set.set()
-
+# Webhook-обработчик
 @app.route("/<path:token>", methods=["POST"])
 def telegram_webhook(token):
     if token != BOT_TOKEN:
@@ -193,11 +182,12 @@ def telegram_webhook(token):
     asyncio.run(application.process_update(update))
     return "OK"
 
+# Health-check
 @app.route("/health")
 def health():
     return "OK"
 
-# === Запуск ===
+# Запуск
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
