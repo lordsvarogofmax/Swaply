@@ -1,12 +1,12 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
     ConversationHandler,
+    ContextTypes,
 )
 
 # Включи логирование
@@ -17,18 +17,17 @@ logging.basicConfig(
 # Состояния диалога
 GIVE, WANT = range(2)
 
-# Твой токен от BotFather (лучше брать из переменных окружения!)
+# Токен бота (обязательно замени!)
 BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
 
-# Простое хранилище (в реальности — Google Таблица или БД)
-users_data = {}  # {user_id: {"give": "...", "want": "..."}}
+# Хранилище заявок (в реальности — Google Sheets или БД)
+users_data = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
+    await update.message.reply_text(
         "👋 Привет! Я — Swaply, бот для честного обмена вещами.\n\n"
         "Готов начать? Напиши, что ты хочешь ОТДАТЬ."
     )
-    await update.message.reply_text(welcome_text)
     return GIVE
 
 async def get_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,7 +45,7 @@ async def get_want(update: Update, context: ContextTypes.DEFAULT_TYPE):
     want_text = update.message.text
     users_data[user_id]["want"] = want_text
 
-    # Здесь можно отправить данные тебе (админу)
+    # Отправить админу (замени YOUR_ADMIN_ID на свой ID)
     admin_message = (
         f"🆕 Новый обмен!\n"
         f"Пользователь: @{update.message.from_user.username or 'нет username'} (ID: {user_id})\n"
@@ -54,7 +53,6 @@ async def get_want(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Хочет: {users_data[user_id]['want']}"
     )
 
-    # Отправить себе (админу) — замени на свой Telegram ID
     YOUR_ADMIN_ID = 364191893  # ← ЗАМЕНИ НА СВОЙ ID!
     await context.bot.send_message(chat_id=YOUR_ADMIN_ID, text=admin_message)
 
@@ -82,7 +80,7 @@ def main():
     )
 
     application.add_handler(conv_handler)
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
