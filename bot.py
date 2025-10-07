@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import threading  # добавь в импорты, если ещё не там
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -177,8 +178,9 @@ _webhook_set = threading.Event()
 def setup_webhook_once():
     if not _webhook_set.is_set():
         with app.app_context():
-            webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}"
-            application.bot.set_webhook(url=webhook_url)
+            render_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+            webhook_url = f"{render_url}/{BOT_TOKEN}"
+            asyncio.run(application.bot.set_webhook(url=webhook_url))
             logging.info(f"Webhook установлен: {webhook_url}")
             _webhook_set.set()
 
