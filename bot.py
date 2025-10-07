@@ -12,12 +12,18 @@ from telegram.ext import (
     filters,
 )
 
-# === ОБЯЗАТЕЛЬНО: определяем состояния ДО их использования ===
+# === Состояния диалога (обязательно до использования) ===
 START, QUERY, CITY, EXCHANGE, PAYMENT = range(5)
 
-logging.basicConfig(level=logging.INFO)
+# === Логирование ===
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
+# === Настройки ===
 BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
+
 CITIES = {
     "Москва": "moskva",
     "Санкт-Петербург": "sankt-peterburg",
@@ -31,7 +37,7 @@ CITIES = {
     "Уфа": "ufa",
 }
 
-# === ФУНКЦИИ ОБРАБОТЧИКОВ ===
+# === Обработчики ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Поехали", callback_data="start_search")]]
@@ -101,3 +107,86 @@ async def payment_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     choice = query.data
     context.user_data["with_payment"] = (choice == "payment_yes")
+    await generate_avito_link(update, context)
+    return ConversationHandler.END
+
+async def generate_avito_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = context.user_data["query"]
+    city_name = context.user_data["city"]
+    city_code = CITIES[city_name]
+    exchange = context.user_data.get("exchange", False)
+    with_payment = context.user_data.get("with_payment", False)
+
+    search_terms = [query]
+    if exchange:
+        search_terms.append("обмен")
+        if with_payment:
+            search_terms.append("доплата")
+        else:
+            search_terms.append("без доплаты")
+
+    full_query = " ".join(search_terms)
+    safe_query = full_query.replace(" ", "+")
+    avito_url = f"https://www.avito.ru/{city_code}?q={safe_query}&s=104"
+
+    message = (
+        "✅ Готово! Вот твоя персональная ссылка на свежие объявления:\n\n"
+        f"🔗 <a href='{avito_url}'>Открыть на Avito</a>\n\n"
+        "💡 Совет: нажми «🔔 Подписаться на поиск» внизу страницы, "
+        "чтобы получать уведомления о новых объявлениях."
+    )
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            message, parse_mode="HTML", disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(
+            message, parse_mode="HTML", disable_web_page_preview=True
+        )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Поиск отменён. Напиши /start, чтобы начать заново.")
+    return ConversationHandler.END
+
+# === Flask + Webhook ===
+
+app = Flask(__name__)
+
+# Инициализация Telegram-бота
+application = Application.builder().token(BOT_TOKEN).build()
+
+conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    states={
+        START: [CallbackQueryHandler(start_search_callback, pattern="^start_search$")],
+        QUERY: [MessageHandler(~filters.COMMAND, get_query)],
+        CITY: [CallbackQueryHandler(city_selected, pattern="^city_")],
+        EXCHANGE: [CallbackQueryHandler(exchange_selected, pattern="^exchange_(yes|no)$")],
+        PAYMENT: [CallbackQueryHandler(payment_selected, pattern="^payment_(yes|no)$")],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+)
+
+application.add_handler(conv_handler)
+
+@app.before_first_request
+def setup_webhook():
+    webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}"
+    application.bot.set_webhook(url=webhook_url)
+    logging.info(f"Webhook установлен: {webhook_url}")
+
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put(update)
+    return "OK"
+
+@app.route("/health")
+def health():
+    return "OK"
+
+# === Запуск ===
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
