@@ -188,8 +188,9 @@ def setup_webhook_once():
 def telegram_webhook(token):
     if token != BOT_TOKEN:
         return "Forbidden", 403
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    asyncio.run(application.process_update(update))
     return "OK"
 
 @app.route("/health")
