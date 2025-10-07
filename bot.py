@@ -182,8 +182,10 @@ def setup_webhook_once():
             logging.info(f"Webhook установлен: {webhook_url}")
             _webhook_set.set()
 
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def telegram_webhook():
+@app.route("/<path:token>", methods=["POST"])
+def telegram_webhook(token):
+    if token != BOT_TOKEN:
+        return "Forbidden", 403
     update = Update.de_json(request.get_json(force=True), application.bot)
     application.update_queue.put(update)
     return "OK"
