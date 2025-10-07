@@ -100,4 +100,4 @@ async def payment_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     choice = query.data
-    context.user_data["with_payment
+    context.user_data["with_payment"] = (choice == "payment_yes")
