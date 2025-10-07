@@ -1,5 +1,6 @@
 import os
 import logging
+import threading  # добавь в импорты, если ещё не там
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -170,11 +171,16 @@ conv_handler = ConversationHandler(
 
 application.add_handler(conv_handler)
 
-@app.before_first_request
-def setup_webhook():
-    webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}"
-    application.bot.set_webhook(url=webhook_url)
-    logging.info(f"Webhook установлен: {webhook_url}")
+_webhook_set = threading.Event()
+
+@app.before_request
+def setup_webhook_once():
+    if not _webhook_set.is_set():
+        with app.app_context():
+            webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{BOT_TOKEN}"
+            application.bot.set_webhook(url=webhook_url)
+            logging.info(f"Webhook установлен: {webhook_url}")
+            _webhook_set.set()
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
