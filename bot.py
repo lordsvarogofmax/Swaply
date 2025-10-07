@@ -128,7 +128,7 @@ async def generate_avito_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     full_query = " ".join(search_terms)
     safe_query = full_query.replace(" ", "+")
-    # ⚠️ ИСПРАВЛЕНО: убраны лишние пробелы в URL!
+    # ✅ ИСПРАВЛЕНО: убраны пробелы в URL
     avito_url = f"https://www.avito.ru/{city_code}?q={safe_query}&s=104"
 
     message = (
@@ -155,9 +155,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = Flask(__name__)
 
-# Инициализация Telegram-бота
+# Создаём и инициализируем Application один раз
 application = Application.builder().token(BOT_TOKEN).build()
 
+# Создаём и запускаем event loop один раз
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
+_loop.run_until_complete(application.initialize())
+
+# Добавляем обработчики
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
@@ -169,7 +175,6 @@ conv_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
-
 application.add_handler(conv_handler)
 
 # Webhook-обработчик
@@ -179,10 +184,10 @@ def telegram_webhook(token):
         return "Forbidden", 403
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    asyncio.run(application.process_update(update))
+    _loop.run_until_complete(application.process_update(update))
     return "OK"
 
-# Health-check
+# Health-check (для Render)
 @app.route("/health")
 def health():
     return "OK"
