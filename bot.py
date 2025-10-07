@@ -1,11 +1,12 @@
-import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,          # ← ДОБАВЛЕНО
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
+    filters,                 # ← ДОБАВЛЕНО (обрати внимание: filters — с маленькой буквы!)
 )
 
 # Логирование
