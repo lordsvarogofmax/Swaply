@@ -12,6 +12,10 @@ from telegram.ext import (
     filters,
 )
 import httpx
+import requests
+from PyPDF2 import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # === Настройки ===
 BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
@@ -23,6 +27,87 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+
+# === Глобальные переменные для RAG ===
+_knowledge_chunks = []
+_vectorizer = None
+_knowledge_ready = False
+
+# === Функция: скачать PDF из Google Drive ===
+def download_knowledge_base():
+    knowledge_dir = "knowledge_base"
+    os.makedirs(knowledge_dir, exist_ok=True)
+
+    files = {
+        "kniga-1.pdf": "1nKeMBQjnYJk-t7uzWoR6fuOWrRu9ojtZ",
+        "kniga-2.pdf": "1QK1iTldWZpwblR2S8u85bMCfR0ras2zm",
+        "kniga-3.pdf": "1x8hTrTn3Ad4eW05aclC7l85Upa6Tn2UL",
+        "kniga-4.pdf": "17LRntDOBzlk408p1GK1M7q2kVcs0wfvD",
+        "kniga-5.pdf": "1GNg4TM7v5cBpx4NaDfGfmKVgVYBn6i84",  # ← исправлено: добавлено .pdf
+    }
+
+    for filename, file_id in files.items():
+        path = os.path.join(knowledge_dir, filename)
+        if not os.path.exists(path):
+            print(f"Скачиваю {filename}...")
+            url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            response = requests.get(url)
+            with open(path, "wb") as f:
+                f.write(response.content)
+            print(f"✅ {filename} загружен.")
+
+# === Функция: извлечь текст из PDF ===
+def extract_text_from_pdf(pdf_path):
+    reader = PdfReader(pdf_path)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
+
+# === Функция: подготовить базу знаний для поиска ===
+def prepare_knowledge_base():
+    global _knowledge_chunks, _vectorizer, _knowledge_ready
+    knowledge_dir = "knowledge_base"
+    all_text = ""
+
+    # Собираем текст из всех PDF
+    for filename in os.listdir(knowledge_dir):
+        if filename.endswith(".pdf"):
+            path = os.path.join(knowledge_dir, filename)
+            print(f"Извлекаю текст из {filename}...")
+            all_text += extract_text_from_pdf(path) + "\n"
+
+    # Разбиваем на чанки по 500 слов
+    sentences = all_text.split(". ")
+    chunks = []
+    current_chunk = ""
+    for sent in sentences:
+        if len(current_chunk.split()) + len(sent.split()) > 500:
+            chunks.append(current_chunk.strip())
+            current_chunk = sent + ". "
+        else:
+            current_chunk += sent + ". "
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    _knowledge_chunks = [chunk for chunk in chunks if len(chunk) > 50]  # убираем мусор
+    print(f"Подготовлено {_knowledge_chunks.__len__()} фрагментов.")
+
+    # Создаём TF-IDF векторизатор
+    _vectorizer = TfidfVectorizer(stop_words="english")
+    _vectorizer.fit(_knowledge_chunks)
+    _knowledge_ready = True
+    print("✅ База знаний готова к использованию.")
+
+# === Функция: найти релевантные фрагменты ===
+def retrieve_relevant_chunks(query, top_k=3):
+    if not _knowledge_ready:
+        return []
+    query_vec = _vectorizer.transform([query])
+    knowledge_vecs = _vectorizer.transform(_knowledge_chunks)
+    similarities = cosine_similarity(query_vec, knowledge_vecs).flatten()
+    top_indices = similarities.argsort()[-top_k:][::-1]
+    return [_knowledge_chunks[i] for i in top_indices if similarities[i] > 0.1]
 
 # === Приветствие ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,7 +136,7 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Как выровнять стены гипсокартоном?\n"
         "• Нужна ли гидроизоляция в ванной под плитку?\n"
         "• Какой краской покрасить деревянный пол?\n\n"
-        "Я дам развернутый, профессиональный ответ."
+        "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
     )
     context.user_data["in_consultation"] = True
 
@@ -63,28 +148,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
+    # Ищем релевантные фрагменты в базе знаний
+    relevant_chunks = retrieve_relevant_chunks(user_text)
+    knowledge_context = "\n\n".join(relevant_chunks) if relevant_chunks else "Нет релевантной информации в базе знаний."
+
     system_prompt = (
-    "Ты — профессиональный строитель с 10-летним опытом. "
-    "Ты отвечаешь ТОЛЬКО на вопросы по строительству и ремонту. "
-    "Если вопрос не по теме — вежливо откажись и напомни, что ты специалист только в строительстве. "
-    "ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. НИКАКИХ КИТАЙСКИХ ИЕРОГЛИФОВ. НИКАКОГО АНГЛИЙСКОГО, КРОМЕ ОБЩЕПРИНЯТЫХ АББРЕВИАТУР (LED, PVC, ГКЛ). "
-    "НЕ ПИШИ РАССУЖДЕНИЯ. НЕ ИСПОЛЬЗУЙ ФРАЗЫ ВРОДЕ «Я думаю», «Мне кажется», «Как строитель, я рекомендую». "
-    "ПИШИ КАК ЭКСПЕРТ: КРАТКО, ТОЧНО, ПО ДЕЛУ. "
-    "НЕ ОБРЫВАЙ ОТВЕТ НА ПОЛУСЛОВЕ. ЗАВЕРШАЙ МЫСЛЬ. "
-    "МАКСИМУМ — 400 слов."
-)
+        "Ты — профессиональный строитель с 10-летним опытом. "
+        "Ты отвечаешь ТОЛЬКО на вопросы по строительству и ремонту. "
+        "Если вопрос не по теме — вежливо откажись и напомни, что ты специалист только в строительстве. "
+        "ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. НИКАКИХ КИТАЙСКИХ ИЕРОГЛИФОВ. НИКАКОГО АНГЛИЙСКОГО, КРОМЕ ОБЩЕПРИНЯТЫХ АББРЕВИАТУР (LED, PVC, ГКЛ). "
+        "НЕ ПИШИ РАССУЖДЕНИЯ. НЕ ИСПОЛЬЗУЙ ФРАЗЫ ВРОДЕ «Я думаю», «Мне кажется». "
+        "ПИШИ КАК ЭКСПЕРТ: КРАТКО, ТОЧНО, ПО ДЕЛУ. "
+        "МАКСИМУМ — 400 слов."
+    )
 
-    if "chat_history" not in context.user_data:
-        context.user_data["chat_history"] = []
-    context.user_data["chat_history"].append({"role": "user", "content": user_text})
-    if len(context.user_data["chat_history"]) > 5:
-        context.user_data["chat_history"] = context.user_data["chat_history"][-5:]
-
-    history_str = "\n".join([
-        f"{msg['role'].capitalize()}: {msg['content']}" 
-        for msg in context.user_data["chat_history"]
-    ])
-    full_prompt = f"{system_prompt}\n\nИстория диалога:\n{history_str}\n\nНовый вопрос: {user_text}\n\nОтветь на русском языке, без лишних слов."
+    if relevant_chunks:
+        full_prompt = (
+            f"{system_prompt}\n\n"
+            f"Информация из строительных справочников и нормативов:\n{knowledge_context}\n\n"
+            f"Вопрос клиента: {user_text}\n\n"
+            f"Ответь на русском языке, без лишних слов."
+        )
+    else:
+        full_prompt = f"{system_prompt}\n\nВопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
 
     await update.message.reply_text("⏳ Минутку, мне нужно подумать...")
 
@@ -93,7 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",  # ← УБРАНЫ ЛИШНИЕ ПРОБЕЛЫ!
+                "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json"
@@ -102,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "model": MODEL,
                     "messages": [{"role": "user", "content": full_prompt}],
                     "max_tokens": 1000,
-                    "temperature": 0.3         # ← добавлено (0.0–1.0; 0.3 = стабильно)
+                    "temperature": 0.3
                 }
             )
             if response.status_code != 200:
@@ -156,5 +242,7 @@ def health():
     return "OK"
 
 if __name__ == "__main__":
+    download_knowledge_base()
+    prepare_knowledge_base()  # ← инициализация RAG
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
