@@ -16,7 +16,7 @@ import httpx
 # === Настройки ===
 BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
 OPENROUTER_API_KEY = "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"
-MODEL = "meta-llama/llama-3.1-8b-instruct"  # Лучший баланс: качество + скорость + бесплатно
+MODEL = "qwen/qwen-2.5-7b-instruct"  # Лучший баланс: качество + скорость + бесплатно
 
 # === Логирование ===
 logging.basicConfig(
