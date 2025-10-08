@@ -1,6 +1,6 @@
 python-telegram-bot==20.7
 flask
 httpx
-requests
+gdown  # ← вместо requests для Google Drive
 PyPDF2
 scikit-learn
