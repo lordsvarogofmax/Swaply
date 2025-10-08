@@ -3,3 +3,4 @@ flask
 httpx
 requests
 PyPDF2
+scikit-learn
