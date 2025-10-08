@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 import httpx
-import requests
+import gdown
 from PyPDF2 import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -43,17 +43,15 @@ def download_knowledge_base():
         "kniga-2.pdf": "1QK1iTldWZpwblR2S8u85bMCfR0ras2zm",
         "kniga-3.pdf": "1x8hTrTn3Ad4eW05aclC7l85Upa6Tn2UL",
         "kniga-4.pdf": "17LRntDOBzlk408p1GK1M7q2kVcs0wfvD",
-        "kniga-5.pdf": "1GNg4TM7v5cBpx4NaDfGfmKVgVYBn6i84",  # ← исправлено: добавлено .pdf
+        "kniga-5.pdf": "1GNg4TM7v5cBpx4NaDfGfmKVgVYBn6i84",
     }
 
     for filename, file_id in files.items():
         path = os.path.join(knowledge_dir, filename)
         if not os.path.exists(path):
             print(f"Скачиваю {filename}...")
-            url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            response = requests.get(url)
-            with open(path, "wb") as f:
-                f.write(response.content)
+            url = f"https://drive.google.com/uc?id={file_id}"
+            gdown.download(url, path, quiet=False)
             print(f"✅ {filename} загружен.")
 
 # === Функция: извлечь текст из PDF ===
