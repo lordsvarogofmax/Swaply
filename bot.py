@@ -101,7 +101,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 json={
                     "model": MODEL,
                     "messages": [{"role": "user", "content": full_prompt}],
-                    "max_tokens": 1000
+                    "max_tokens": 1000,
                     "temperature": 0.3         # ← добавлено (0.0–1.0; 0.3 = стабильно)
                 }
             )
