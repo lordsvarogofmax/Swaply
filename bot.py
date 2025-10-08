@@ -16,7 +16,7 @@ import httpx
 # === Настройки ===
 BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
 OPENROUTER_API_KEY = "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"
-MODEL = "qwen/qwen-2.5-7b-instruct"  # Лучший баланс: качество + скорость + бесплатно
+MODEL = "qwen/qwen-2.5-7b-instruct"
 
 # === Логирование ===
 logging.basicConfig(
@@ -53,10 +53,10 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Какой краской покрасить деревянный пол?\n\n"
         "Я дам развернутый, профессиональный ответ."
     )
-    # Сохраняем состояние: пользователь в режиме консультации
     context.user_data["in_consultation"] = True
 
-# === Обработка текстовых сообщений ===async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Обработка текстовых сообщений ===
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("in_consultation", False):
         await start(update, context)
         return
@@ -93,7 +93,7 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions",  # ← УБРАНЫ ЛИШНИЕ ПРОБЕЛЫ!
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json"
@@ -127,18 +127,16 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Не удалось получить ответ. Возможно, временные проблемы с сервисом. "
             "Попробуйте через минуту или переформулируйте вопрос."
         )
+
 # === Flask + Webhook ===
 app = Flask(__name__)
 
-# Инициализация Telegram-бота
 application = Application.builder().token(BOT_TOKEN).build()
 
-# Регистрация обработчиков
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(ask_callback, pattern="^ask$"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Event loop для асинхронных вызовов
 _loop = asyncio.new_event_loop()
 asyncio.set_event_loop(_loop)
 _loop.run_until_complete(application.initialize())
