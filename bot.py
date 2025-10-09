@@ -85,12 +85,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
-    # История диалога (до 5 сообщений)
+    # История диалога (до 10 сообщений)
     if "chat_history" not in context.user_data:
         context.user_data["chat_history"] = []
     context.user_data["chat_history"].append({"role": "user", "content": user_text})
-    if len(context.user_data["chat_history"]) > 5:
-        context.user_data["chat_history"] = context.user_data["chat_history"][-5:]
+    if len(context.user_data["chat_history"]) > 10:
+        context.user_data["chat_history"] = context.user_data["chat_history"][-10:]
 
     # Поиск релевантных фрагментов
     relevant_chunks = retrieve_relevant_chunks(user_text)
