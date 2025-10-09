@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import json
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,13 +26,42 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# === Загрузка базы знаний (предварительно обработанной) ===
-with open("knowledge_chunks.json", "r", encoding="utf-8") as f:
-    _knowledge_chunks = json.load(f)
+# === Загрузка базы знаний из base_knowledge/*.txt ===
+_knowledge_chunks = []
+knowledge_dir = "base_knowledge"
 
-_vectorizer = TfidfVectorizer(stop_words=None)
-_vectorizer.fit(_knowledge_chunks)
-_knowledge_ready = True
+if os.path.exists(knowledge_dir):
+    for filename in ["kniga-1.txt", "kniga-2.txt", "kniga-3.txt"]:
+        path = os.path.join(knowledge_dir, filename)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+                # Разбиваем на чанки по ~500 слов
+                sentences = text.split(". ")
+                current_chunk = ""
+                for sent in sentences:
+                    if len(current_chunk.split()) + len(sent.split()) > 500:
+                        if len(current_chunk) > 50:
+                            _knowledge_chunks.append(current_chunk.strip())
+                        current_chunk = sent + ". "
+                    else:
+                        current_chunk += sent + ". "
+                if current_chunk and len(current_chunk) > 50:
+                    _knowledge_chunks.append(current_chunk.strip())
+        else:
+            print(f"⚠️ Файл не найден: {path}")
+
+    print(f"✅ Загружено {_knowledge_chunks.__len__()} фрагментов из base_knowledge/")
+else:
+    print("❌ Папка base_knowledge не найдена!")
+
+# Подготавливаем TF-IDF векторизатор
+if _knowledge_chunks:
+    _vectorizer = TfidfVectorizer(stop_words=None)
+    _vectorizer.fit(_knowledge_chunks)
+    _knowledge_ready = True
+else:
+    _knowledge_ready = False
 
 # === Приветствие ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -144,7 +172,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             logging.info(f"Получен ответ от OpenRouter: {answer[:200]}")
 
-            keyboard = [[InlineKeyboardButton("🔄 Задать ещё вопрос", callback_data="ask")]]
+            keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
