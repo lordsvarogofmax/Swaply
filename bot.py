@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import json
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,13 +13,11 @@ from telegram.ext import (
     filters,
 )
 import httpx
-import gdown
-from PyPDF2 import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # === Настройки ===
-BOT_TOKEN = "8379969489:AAGQNjLanMwL5vyKfsSfLc5kK5UObZnCQ5E"
+BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
 OPENROUTER_API_KEY = "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"
 MODEL = "meta-llama/llama-3.1-70b-instruct"
 
@@ -28,84 +27,13 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# === Глобальные переменные для RAG ===
-_knowledge_chunks = []
-_vectorizer = None
-_knowledge_ready = False
+# === Загрузка базы знаний (предварительно обработанной) ===
+with open("knowledge_chunks.json", "r", encoding="utf-8") as f:
+    _knowledge_chunks = json.load(f)
 
-# === Функция: скачать PDF из Google Drive ===
-def download_knowledge_base():
-    knowledge_dir = "knowledge_base"
-    os.makedirs(knowledge_dir, exist_ok=True)
-
-    files = {
-        "kniga-1.pdf": "1nKeMBQjnYJk-t7uzWoR6fuOWrRu9ojtZ",
-        "kniga-2.pdf": "1QK1iTldWZpwblR2S8u85bMCfR0ras2zm",
-        "kniga-3.pdf": "1x8hTrTn3Ad4eW05aclC7l85Upa6Tn2UL",
-        "kniga-4.pdf": "17LRntDOBzlk408p1GK1M7q2kVcs0wfvD",
-        "kniga-5.pdf": "1GNg4TM7v5cBpx4NaDfGfmKVgVYBn6i84",
-    }
-
-    for filename, file_id in files.items():
-        path = os.path.join(knowledge_dir, filename)
-        if not os.path.exists(path):
-            print(f"Скачиваю {filename}...")
-            url = f"https://drive.google.com/uc?id={file_id}"
-            gdown.download(url, path, quiet=False)
-            print(f"✅ {filename} загружен.")
-
-# === Функция: извлечь текст из PDF ===
-def extract_text_from_pdf(pdf_path):
-    reader = PdfReader(pdf_path)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text
-
-# === Функция: подготовить базу знаний для поиска ===
-def prepare_knowledge_base():
-    global _knowledge_chunks, _vectorizer, _knowledge_ready
-    knowledge_dir = "knowledge_base"
-    all_text = ""
-
-    # Собираем текст из всех PDF
-    for filename in os.listdir(knowledge_dir):
-        if filename.endswith(".pdf"):
-            path = os.path.join(knowledge_dir, filename)
-            print(f"Извлекаю текст из {filename}...")
-            all_text += extract_text_from_pdf(path) + "\n"
-
-    # Разбиваем на чанки по 500 слов
-    sentences = all_text.split(". ")
-    chunks = []
-    current_chunk = ""
-    for sent in sentences:
-        if len(current_chunk.split()) + len(sent.split()) > 500:
-            chunks.append(current_chunk.strip())
-            current_chunk = sent + ". "
-        else:
-            current_chunk += sent + ". "
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    _knowledge_chunks = [chunk for chunk in chunks if len(chunk) > 50]  # убираем мусор
-    print(f"Подготовлено {_knowledge_chunks.__len__()} фрагментов.")
-
-    # Создаём TF-IDF векторизатор
-    _vectorizer = TfidfVectorizer(stop_words="english")
-    _vectorizer.fit(_knowledge_chunks)
-    _knowledge_ready = True
-    print("✅ База знаний готова к использованию.")
-
-# === Функция: найти релевантные фрагменты ===
-def retrieve_relevant_chunks(query, top_k=3):
-    if not _knowledge_ready:
-        return []
-    query_vec = _vectorizer.transform([query])
-    knowledge_vecs = _vectorizer.transform(_knowledge_chunks)
-    similarities = cosine_similarity(query_vec, knowledge_vecs).flatten()
-    top_indices = similarities.argsort()[-top_k:][::-1]
-    return [_knowledge_chunks[i] for i in top_indices if similarities[i] > 0.1]
+_vectorizer = TfidfVectorizer(stop_words=None)
+_vectorizer.fit(_knowledge_chunks)
+_knowledge_ready = True
 
 # === Приветствие ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,6 +66,16 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["in_consultation"] = True
 
+# === Поиск релевантных фрагментов ===
+def retrieve_relevant_chunks(query, top_k=3):
+    if not _knowledge_ready:
+        return []
+    query_vec = _vectorizer.transform([query])
+    knowledge_vecs = _vectorizer.transform(_knowledge_chunks)
+    similarities = cosine_similarity(query_vec, knowledge_vecs).flatten()
+    top_indices = similarities.argsort()[-top_k:][::-1]
+    return [_knowledge_chunks[i] for i in top_indices if similarities[i] > 0.1]
+
 # === Обработка текстовых сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("in_consultation", False):
@@ -146,10 +84,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
-    # Ищем релевантные фрагменты в базе знаний
+    # История диалога (до 5 сообщений)
+    if "chat_history" not in context.user_data:
+        context.user_data["chat_history"] = []
+    context.user_data["chat_history"].append({"role": "user", "content": user_text})
+    if len(context.user_data["chat_history"]) > 5:
+        context.user_data["chat_history"] = context.user_data["chat_history"][-5:]
+
+    # Поиск релевантных фрагментов
     relevant_chunks = retrieve_relevant_chunks(user_text)
     knowledge_context = "\n\n".join(relevant_chunks) if relevant_chunks else "Нет релевантной информации в базе знаний."
 
+    # Системный промпт
     system_prompt = (
         "Ты — профессиональный строитель с 10-летним опытом. "
         "Ты отвечаешь ТОЛЬКО на вопросы по строительству и ремонту. "
@@ -240,7 +186,5 @@ def health():
     return "OK"
 
 if __name__ == "__main__":
-    download_knowledge_base()
-    prepare_knowledge_base()  # ← инициализация RAG
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
