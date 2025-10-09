@@ -16,7 +16,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # === Настройки ===
-BOT_TOKEN = "8341008966:AAHxnL0qaKoyfQSve6lRoopxnjFAS7u8mUg"
+BOT_TOKEN = "8379969489:AAGQNjLanMwL5vyKfsSfLc5kK5UObZnCQ5E"
 OPENROUTER_API_KEY = "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"
 MODEL = "meta-llama/llama-3.1-70b-instruct"
 
