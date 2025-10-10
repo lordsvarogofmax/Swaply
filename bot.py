@@ -14,6 +14,8 @@ from telegram.ext import (
 import httpx
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from datetime import datetime
+from selectolax.parser import HTMLParser
 
 # === Настройки ===
 BOT_TOKEN = "8379969489:AAGQNjLanMwL5vyKfsSfLc5kK5UObZnCQ5E"
@@ -105,6 +107,61 @@ def retrieve_relevant_chunks(query, top_k=3):
     top_indices = similarities.argsort()[-top_k:][::-1]
     return [_knowledge_chunks[i] for i in top_indices if similarities[i] > 0.1]
 
+# === Ищет актуальные нормативные документы на docs.cntd.ru ===
+
+async def search_cntd(query: str, max_chars=1500) -> str:
+    """Ищет актуальные нормативные документы на docs.cntd.ru"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            search_url = f"https://docs.cntd.ru/search?text={query}"
+            response = await client.get(search_url)
+            response.raise_for_status()
+
+            tree = HTMLParser(response.text)
+            results = []
+
+            for item in tree.css("div.search-results__item"):
+                title_node = item.css_first("a")
+                if not title_node:
+                    continue
+
+                title = title_node.text().strip()
+                href = title_node.attributes.get("href")
+                if not href or not href.startswith("/document/"):
+                    continue
+
+                # Проверяем статус (пропускаем отменённые)
+                status_node = item.css_first("span.document-info__status")
+                status = status_node.text().strip().lower() if status_node else ""
+                if "отмен" in status or "не действует" in status:
+                    continue
+
+                results.append({"title": title, "url": "https://docs.cntd.ru" + href})
+
+            if not results:
+                return ""
+
+            # Берём первый результат
+            doc_url = results[0]["url"]
+            doc_resp = await client.get(doc_url)
+            doc_tree = HTMLParser(doc_resp.text)
+
+            content = ""
+            for p in doc_tree.css("div.document-content p"):
+                text = p.text().strip()
+                if text and len(text) > 20:
+                    content += text + "\n"
+                    if len(content) > max_chars:
+                        break
+
+            if content:
+                return f"[Источник: {results[0]['title']}]\n{content[:max_chars]}..."
+            return ""
+
+    except Exception as e:
+        logging.error(f"Ошибка поиска на cntd.ru: {e}")
+        return ""
+
 # === Обработка текстовых сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("in_consultation", False):
@@ -113,32 +170,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.strip()
 
-    # История диалога (до 10 сообщений)
-    if "chat_history" not in context.user_data:
-        context.user_data["chat_history"] = []
-    context.user_data["chat_history"].append({"role": "user", "content": user_text})
-    if len(context.user_data["chat_history"]) > 10:
-        context.user_data["chat_history"] = context.user_data["chat_history"][-10:]
+    # Проверка: запрос про нормативы?
+    is_normative = any(word in user_text.lower() for word in [
+        "снип", "гост", "сп ", "свод правил", "актуальн", "действует",
+        "новый", "нормы", "требован", "стандарт", "2025", "2024", "обновл"
+    ])
 
-    # Поиск релевантных фрагментов
-    relevant_chunks = retrieve_relevant_chunks(user_text)
-    knowledge_context = "\n\n".join(relevant_chunks) if relevant_chunks else "Нет релевантной информации в базе знаний."
+    relevant_chunks = []
+    online_context = ""
 
-    # Системный промпт
+    if is_normative:
+        online_context = await search_cntd(user_text)
+        if not online_context:
+            # Fallback на локальную базу
+            relevant_chunks = retrieve_relevant_chunks(user_text)
+    else:
+        relevant_chunks = retrieve_relevant_chunks(user_text)
+
+    # Формируем контекст
+    if online_context:
+        knowledge_context = online_context
+    elif relevant_chunks:
+        knowledge_context = "\n\n".join(relevant_chunks)
+    else:
+        knowledge_context = "Нет релевантной информации в базе знаний."
+
+    # Системный промпт с указанием года
+    current_year = datetime.now().year
     system_prompt = (
-        "Ты — профессиональный строитель с 10-летним опытом. "
+        f"Сегодня {current_year} год. Ты — профессиональный строитель с 10-летним опытом. "
         "Ты отвечаешь ТОЛЬКО на вопросы по строительству и ремонту. "
-        "Если вопрос не по теме — вежливо откажись и напомни, что ты специалист только в строительстве. "
-        "ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. НИКАКИХ КИТАЙСКИХ ИЕРОГЛИФОВ. НИКАКОГО АНГЛИЙСКОГО, КРОМЕ ОБЩЕПРИНЯТЫХ АББРЕВИАТУР (LED, PVC, ГКЛ). "
-        "НЕ ПИШИ РАССУЖДЕНИЯ. НЕ ИСПОЛЬЗУЙ ФРАЗЫ ВРОДЕ «Я думаю», «Мне кажется». "
+        "Если вопрос не по теме — вежливо откажись. "
+        "ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. "
+        "НЕ ПИШИ РАССУЖДЕНИЯ. НЕ ИСПОЛЬЗУЙ ФРАЗЫ ВРОДЕ «Я думаю». "
         "ПИШИ КАК ЭКСПЕРТ: КРАТКО, ТОЧНО, ПО ДЕЛУ. "
         "МАКСИМУМ — 400 слов."
     )
 
-    if relevant_chunks:
+    if online_context or relevant_chunks:
         full_prompt = (
             f"{system_prompt}\n\n"
-            f"Информация из строительных справочников и нормативов:\n{knowledge_context}\n\n"
+            f"Информация из строительных нормативов:\n{knowledge_context}\n\n"
             f"Вопрос клиента: {user_text}\n\n"
             f"Ответь на русском языке, без лишних слов."
         )
@@ -146,13 +218,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_prompt = f"{system_prompt}\n\nВопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
 
     await update.message.reply_text("⏳ Минутку, мне нужно подумать...")
-
     logging.info(f"Отправляю запрос к OpenRouter: {full_prompt[:200]}...")
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions",  # ← УБРАНЫ ЛИШНИЕ ПРОБЕЛЫ!
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json"
