@@ -167,7 +167,7 @@ async def search_cntd(query: str, max_chars=1500) -> str:
     except Exception as e:
         logging.error(f"Ошибка поиска на cntd.ru: {e}")
         return ""
-
+        
 # === Обработка текстовых сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("in_consultation", False):
