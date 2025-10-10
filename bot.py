@@ -116,45 +116,44 @@ async def search_cntd(query: str, max_chars=1500) -> str:
             follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate",
+                "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
             }
         ) as client:
             search_url = f"https://docs.cntd.ru/search?text={query}"
             response = await client.get(search_url)
             response.raise_for_status()
 
+            # Парсинг без изменений
             tree = HTMLParser(response.text)
             results = []
-
             for item in tree.css("div.search-results__item"):
                 title_node = item.css_first("a")
                 if not title_node:
                     continue
-
                 title = title_node.text().strip()
                 href = title_node.attributes.get("href")
                 if not href or not href.startswith("/document/"):
                     continue
-
-                # Проверяем статус (пропускаем отменённые)
                 status_node = item.css_first("span.document-info__status")
                 status = status_node.text().strip().lower() if status_node else ""
                 if "отмен" in status or "не действует" in status:
                     continue
-
                 results.append({"title": title, "url": "https://docs.cntd.ru" + href})
 
             if not results:
                 return ""
 
-            # Берём первый результат
             doc_url = results[0]["url"]
             doc_resp = await client.get(doc_url)
             doc_tree = HTMLParser(doc_resp.text)
-
             content = ""
             for p in doc_tree.css("div.document-content p"):
                 text = p.text().strip()
@@ -163,9 +162,7 @@ async def search_cntd(query: str, max_chars=1500) -> str:
                     if len(content) > max_chars:
                         break
 
-            if content:
-                return f"[Источник: {results[0]['title']}]\n{content[:max_chars]}..."
-            return ""
+            return f"[Источник: {results[0]['title']}]\n{content[:max_chars]}..." if content else ""
 
     except Exception as e:
         logging.error(f"Ошибка поиска на cntd.ru: {e}")
