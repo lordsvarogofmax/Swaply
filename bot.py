@@ -110,9 +110,18 @@ def retrieve_relevant_chunks(query, top_k=3):
 # === Ищет актуальные нормативные документы на docs.cntd.ru ===
 
 async def search_cntd(query: str, max_chars=1500) -> str:
-    """Ищет актуальные нормативные документы на docs.cntd.ru"""
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            }
+        ) as client:
             search_url = f"https://docs.cntd.ru/search?text={query}"
             response = await client.get(search_url)
             response.raise_for_status()
