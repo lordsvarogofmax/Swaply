@@ -3,3 +3,5 @@ flask
 httpx
 scikit-learn
 selectolax>=0.3.20
+python-dotenv
+PyPDF2

@@ -16,11 +16,17 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
 from selectolax.parser import HTMLParser
+from dotenv import load_dotenv
+import glob
 
 # === Настройки ===
-BOT_TOKEN = "8379969489:AAGQNjLanMwL5vyKfsSfLc5kK5UObZnCQ5E"
-OPENROUTER_API_KEY = "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"
-MODEL = "meta-llama/llama-3.1-70b-instruct"
+load_dotenv()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
+
+if not BOT_TOKEN or not OPENROUTER_API_KEY:
+    logging.warning("Переменные окружения BOT_TOKEN или OPENROUTER_API_KEY не заданы. Установите их в .env")
 
 # === Логирование ===
 logging.basicConfig(
@@ -33,9 +39,11 @@ _knowledge_chunks = []
 knowledge_dir = "base_knowledge"
 
 if os.path.exists(knowledge_dir):
-    for filename in ["kniga-1.txt", "kniga-2.txt", "kniga-3.txt"]:
-        path = os.path.join(knowledge_dir, filename)
-        if os.path.exists(path):
+    txt_files = sorted(glob.glob(os.path.join(knowledge_dir, "*.txt")))
+    if not txt_files:
+        print("⚠️ В папке base_knowledge нет .txt файлов")
+    for path in txt_files:
+        try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read().strip()
                 # Разбиваем на чанки по ~500 слов
@@ -50,10 +58,10 @@ if os.path.exists(knowledge_dir):
                         current_chunk += sent + ". "
                 if current_chunk and len(current_chunk) > 50:
                     _knowledge_chunks.append(current_chunk.strip())
-        else:
-            print(f"⚠️ Файл не найден: {path}")
+        except Exception as e:
+            logging.error(f"Ошибка чтения {path}: {e}")
 
-    print(f"✅ Загружено {_knowledge_chunks.__len__()} фрагментов из base_knowledge/")
+    print(f"✅ Загружено {len(_knowledge_chunks)} фрагментов из base_knowledge/")
 else:
     print("❌ Папка base_knowledge не найдена!")
 
@@ -214,49 +222,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if online_context or relevant_chunks:
-        full_prompt = (
-            f"{system_prompt}\n\n"
+        user_prompt = (
             f"Информация из строительных нормативов:\n{knowledge_context}\n\n"
             f"Вопрос клиента: {user_text}\n\n"
             f"Ответь на русском языке, без лишних слов."
         )
     else:
-        full_prompt = f"{system_prompt}\n\nВопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
+        user_prompt = f"Вопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
 
     await update.message.reply_text("⏳ Минутку, мне нужно подумать...")
     logging.info(f"Отправляю запрос к OpenRouter: {full_prompt[:200]}...")
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",  # ← УБРАНЫ ЛИШНИЕ ПРОБЕЛЫ!
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": MODEL,
-                    "messages": [{"role": "user", "content": full_prompt}],
-                    "max_tokens": 1000,
-                    "temperature": 0.3
-                }
-            )
-            if response.status_code != 200:
-                raise Exception(f"HTTP {response.status_code}: {response.text}")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        last_error = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": MODEL,
+                            "messages": messages,
+                            "max_tokens": 1000,
+                            "temperature": 0.3
+                        }
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    answer = data["choices"][0]["message"]["content"].strip()
+                    logging.info(f"Получен ответ от OpenRouter: {answer[:200]}")
 
-            data = response.json()
-            answer = data["choices"][0]["message"]["content"].strip()
+                    keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await update.message.reply_text(
+                        answer,
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=True
+                    )
+                    break
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text}"
+                    logging.warning(f"Попытка {attempt+1}/3 не удалась: {last_error}")
+            except Exception as inner_e:
+                last_error = str(inner_e)
+                logging.warning(f"Попытка {attempt+1}/3 завершилась ошибкой: {last_error}")
+            await asyncio.sleep(1.5 * (attempt + 1))
 
-            logging.info(f"Получен ответ от OpenRouter: {answer[:200]}")
-
-            keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(
-                answer,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
+        else:
+            raise Exception(last_error or "Неизвестная ошибка при обращении к OpenRouter")
 
     except Exception as e:
         logging.error(f"Ошибка ИИ: {e}")
