@@ -1,7 +1,9 @@
 import os
 import logging
 import asyncio
-from flask import Flask, request
+import sqlite3
+import json
+from flask import Flask, request, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,19 +16,139 @@ from telegram.ext import (
 import httpx
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from datetime import datetime
+from datetime import datetime, timedelta
 from selectolax.parser import HTMLParser
 from dotenv import load_dotenv
 import glob
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+import tempfile
 
 # === Настройки ===
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "364191893"))
 
 if not BOT_TOKEN or not OPENROUTER_API_KEY:
     logging.warning("Переменные окружения BOT_TOKEN или OPENROUTER_API_KEY не заданы. Установите их в .env")
+
+# === База данных ===
+def init_database():
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    
+    # Таблица для отслеживания взаимодействий пользователей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            session_id TEXT,
+            feedback_given BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    
+    # Таблица для обратной связи
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            interaction_id INTEGER,
+            rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+            comment TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (interaction_id) REFERENCES user_interactions (id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Инициализируем базу данных
+init_database()
+
+# === Вспомогательные функции для работы с БД ===
+def save_interaction(user_id, username, first_name, last_name, question, answer, session_id=None):
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO user_interactions (user_id, username, first_name, last_name, question, answer, session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username, first_name, last_name, question, answer, session_id))
+    interaction_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return interaction_id
+
+def save_feedback(user_id, interaction_id, rating, comment):
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO feedback (user_id, interaction_id, rating, comment)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, interaction_id, rating, comment))
+    
+    # Отмечаем, что обратная связь была дана
+    cursor.execute('''
+        UPDATE user_interactions SET feedback_given = TRUE WHERE id = ?
+    ''', (interaction_id,))
+    
+    conn.commit()
+    conn.close()
+
+def get_user_interaction_count(user_id, days=30):
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(*) FROM user_interactions 
+        WHERE user_id = ? AND timestamp >= datetime('now', '-{} days')
+    '''.format(days), (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+def has_given_feedback(user_id, interaction_id):
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(*) FROM feedback WHERE user_id = ? AND interaction_id = ?
+    ''', (user_id, interaction_id))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def get_admin_stats(days=30):
+    conn = sqlite3.connect('bot_feedback.db')
+    
+    # Получаем статистику за последние N дней
+    query = '''
+        SELECT 
+            ui.user_id,
+            ui.username,
+            ui.first_name,
+            ui.last_name,
+            ui.question,
+            ui.answer,
+            ui.timestamp,
+            f.rating,
+            f.comment
+        FROM user_interactions ui
+        LEFT JOIN feedback f ON ui.id = f.interaction_id
+        WHERE ui.timestamp >= datetime('now', '-{} days')
+        ORDER BY ui.timestamp DESC
+    '''.format(days)
+    
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
 
 # === Логирование ===
 logging.basicConfig(
@@ -176,8 +298,151 @@ async def search_cntd(query: str, max_chars=1500) -> str:
         logging.error(f"Ошибка поиска на cntd.ru: {e}")
         return ""
         
+# === Обработка обратной связи ===
+async def handle_feedback_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not query.data.startswith("rating_"):
+        return
+    
+    rating = int(query.data.split("_")[1])
+    interaction_id = context.user_data.get("current_interaction_id")
+    
+    if not interaction_id:
+        await query.edit_message_text("❌ Ошибка: не найден ID взаимодействия")
+        return
+    
+    # Сохраняем оценку
+    save_feedback(update.effective_user.id, interaction_id, rating, None)
+    
+    await query.edit_message_text(
+        f"✅ Спасибо за оценку {rating} звезд! "
+        "Если хотите, можете оставить комментарий (просто напишите его в следующем сообщении). "
+        "Или нажмите кнопку для нового вопроса.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💬 Новый вопрос", callback_data="ask")
+        ]])
+    )
+    
+    # Устанавливаем состояние ожидания комментария
+    context.user_data["waiting_for_comment"] = True
+
+async def handle_feedback_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("waiting_for_comment"):
+        return
+    
+    comment = update.message.text.strip()
+    interaction_id = context.user_data.get("current_interaction_id")
+    
+    if not interaction_id:
+        return
+    
+    # Обновляем комментарий в базе
+    conn = sqlite3.connect('bot_feedback.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE feedback SET comment = ? WHERE interaction_id = ? AND user_id = ?
+    ''', (comment, interaction_id, update.effective_user.id))
+    conn.commit()
+    conn.close()
+    
+    await update.message.reply_text(
+        "✅ Спасибо за комментарий! Ваше мнение поможет улучшить качество консультаций.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💬 Новый вопрос", callback_data="ask")
+        ]])
+    )
+    
+    # Очищаем состояние
+    context.user_data.pop("current_interaction_id", None)
+    context.user_data.pop("waiting_for_comment", None)
+
+# === Админские команды ===
+async def handle_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой команды.")
+        return
+    
+    try:
+        # Получаем статистику за последние 30 дней
+        df = get_admin_stats(30)
+        
+        if df.empty:
+            await update.message.reply_text("📊 За последние 30 дней нет данных для анализа.")
+            return
+        
+        # Создаем Excel файл
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Статистика бота"
+        
+        # Заголовки
+        headers = [
+            "ID пользователя", "Имя пользователя", "Имя", "Фамилия", 
+            "Вопрос", "Ответ", "Дата/время", "Оценка", "Комментарий"
+        ]
+        
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Данные
+        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
+            ws.cell(row=row_idx, column=1, value=row['user_id'])
+            ws.cell(row=row_idx, column=2, value=row['username'] or '')
+            ws.cell(row=row_idx, column=3, value=row['first_name'] or '')
+            ws.cell(row=row_idx, column=4, value=row['last_name'] or '')
+            ws.cell(row=row_idx, column=5, value=row['question'][:100] + '...' if len(str(row['question'])) > 100 else row['question'])
+            ws.cell(row=row_idx, column=6, value=row['answer'][:100] + '...' if len(str(row['answer'])) > 100 else row['answer'])
+            ws.cell(row=row_idx, column=7, value=row['timestamp'])
+            ws.cell(row=row_idx, column=8, value=row['rating'] if pd.notna(row['rating']) else 'Нет оценки')
+            ws.cell(row=row_idx, column=9, value=row['comment'] or '')
+        
+        # Автоширина колонок
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+            wb.save(tmp_file.name)
+            tmp_file_path = tmp_file.name
+        
+        # Отправляем файл
+        with open(tmp_file_path, 'rb') as file:
+            await update.message.reply_document(
+                document=file,
+                filename=f"bot_statistics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                caption=f"📊 Статистика использования бота за последние 30 дней\n"
+                       f"Всего взаимодействий: {len(df)}\n"
+                       f"Уникальных пользователей: {df['user_id'].nunique()}\n"
+                       f"Средняя оценка: {df['rating'].mean():.2f}" if not df['rating'].isna().all() else "Оценок пока нет"
+            )
+        
+        # Удаляем временный файл
+        os.unlink(tmp_file_path)
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании статистики: {e}")
+        await update.message.reply_text("❌ Ошибка при создании статистики. Проверьте логи.")
+
 # === Обработка текстовых сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, ждем ли мы комментарий
+    if context.user_data.get("waiting_for_comment"):
+        await handle_feedback_comment(update, context)
+        return
+    
     if not context.user_data.get("in_consultation", False):
         await start(update, context)
         return
@@ -231,7 +496,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_prompt = f"Вопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
 
     await update.message.reply_text("⏳ Минутку, мне нужно подумать...")
-    logging.info(f"Отправляю запрос к OpenRouter: {full_prompt[:200]}...")
+    logging.info(f"Отправляю запрос к OpenRouter: {user_prompt[:200]}...")
 
     try:
         messages = [
@@ -260,13 +525,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     answer = data["choices"][0]["message"]["content"].strip()
                     logging.info(f"Получен ответ от OpenRouter: {answer[:200]}")
 
-                    keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await update.message.reply_text(
-                        answer,
-                        reply_markup=reply_markup,
-                        disable_web_page_preview=True
+                    # Сохраняем взаимодействие в БД
+                    user = update.effective_user
+                    interaction_id = save_interaction(
+                        user.id, 
+                        user.username, 
+                        user.first_name, 
+                        user.last_name, 
+                        user_text, 
+                        answer
                     )
+                    
+                    # Проверяем, нужно ли запросить обратную связь (после 3-го взаимодействия)
+                    interaction_count = get_user_interaction_count(user.id)
+                    
+                    if interaction_count == 3 and not has_given_feedback(user.id, interaction_id):
+                        # Показываем запрос на оценку
+                        keyboard = [
+                            [InlineKeyboardButton("⭐ 1", callback_data="rating_1")],
+                            [InlineKeyboardButton("⭐⭐ 2", callback_data="rating_2")],
+                            [InlineKeyboardButton("⭐⭐⭐ 3", callback_data="rating_3")],
+                            [InlineKeyboardButton("⭐⭐⭐⭐ 4", callback_data="rating_4")],
+                            [InlineKeyboardButton("⭐⭐⭐⭐⭐ 5", callback_data="rating_5")]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        
+                        await update.message.reply_text(
+                            f"{answer}\n\n"
+                            "📊 **Пожалуйста, оцените качество ответа:**\n"
+                            "Насколько полезной была информация? (1-5 звезд)",
+                            reply_markup=reply_markup,
+                            disable_web_page_preview=True,
+                            parse_mode="Markdown"
+                        )
+                        
+                        # Сохраняем ID взаимодействия для обратной связи
+                        context.user_data["current_interaction_id"] = interaction_id
+                    else:
+                        # Обычный ответ с кнопкой нового вопроса
+                        keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await update.message.reply_text(
+                            answer,
+                            reply_markup=reply_markup,
+                            disable_web_page_preview=True
+                        )
                     break
                 else:
                     last_error = f"HTTP {response.status_code}: {response.text}"
@@ -292,7 +595,9 @@ app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("stats", handle_admin_stats))
 application.add_handler(CallbackQueryHandler(ask_callback, pattern="^ask$"))
+application.add_handler(CallbackQueryHandler(handle_feedback_rating, pattern="^rating_"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 _loop = asyncio.new_event_loop()
