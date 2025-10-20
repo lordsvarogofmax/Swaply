@@ -163,6 +163,42 @@ def get_admin_stats(days=30):
     conn.close()
     return df
 
+# === Функции для работы с историей диалога ===
+def add_to_conversation_history(user_data, question, answer):
+    """Добавляет вопрос и ответ в историю диалога пользователя"""
+    if 'conversation_history' not in user_data:
+        user_data['conversation_history'] = []
+    
+    # Добавляем новую пару вопрос-ответ
+    user_data['conversation_history'].append({
+        'question': question,
+        'answer': answer,
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    # Ограничиваем историю 10 парами (20 сообщений)
+    if len(user_data['conversation_history']) > 10:
+        user_data['conversation_history'] = user_data['conversation_history'][-10:]
+    
+    return user_data['conversation_history']
+
+def get_conversation_context(user_data):
+    """Возвращает контекст диалога для передачи в ИИ"""
+    if 'conversation_history' not in user_data or not user_data['conversation_history']:
+        return ""
+    
+    context_parts = []
+    for i, entry in enumerate(user_data['conversation_history'], 1):
+        context_parts.append(f"Вопрос {i}: {entry['question']}")
+        context_parts.append(f"Ответ {i}: {entry['answer']}")
+    
+    return "\n\n".join(context_parts)
+
+def clear_conversation_history(user_data):
+    """Очищает историю диалога пользователя"""
+    user_data['conversation_history'] = []
+    return user_data
+
 # === Логирование ===
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -219,8 +255,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Выборе материалов и инструментов\n"
         "• Расчёте смет и сроков\n\n"
         "• Отвечу на вопросы по СНиПам и ГОСТам\n\n"
-        "⚠️ **Примечание**: я отвечаю **только по теме строительства и ремонта**. "
-        "Я поддерживаю ветку диалога до 10 сообщений\n\n"
+        "💬 **Система диалога**: Я помню контекст наших разговоров и могу отвечать на уточняющие вопросы. "
+        "Поддерживаю ветку из **10 вопросов-ответов**, после чего память очищается.\n\n"
+        "⚠️ **Примечание**: я отвечаю **только по теме строительства и ремонта**.\n\n"
         "Готов помочь вам с реальной задачей — просто опишите её."
     )
     keyboard = [[InlineKeyboardButton("💬 Получить новую консультацию", callback_data="ask")]]
@@ -231,13 +268,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
-        "📝 Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
-        "• Как выровнять стены гипсокартоном?\n"
-        "• Нужна ли гидроизоляция в ванной под плитку?\n"
-        "• Какой краской покрасить деревянный пол?\n\n"
-        "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
-    )
+    
+    # Проверяем, есть ли история диалога
+    conversation_history = context.user_data.get('conversation_history', [])
+    history_count = len(conversation_history)
+    
+    if history_count >= 10:
+        # Если достигли лимита в 10 пар, очищаем историю
+        clear_conversation_history(context.user_data)
+        await query.edit_message_text(
+            "🔄 **История диалога очищена** (достигнут лимит в 10 вопросов)\n\n"
+            "📝 Напишите ваш новый вопрос по строительству или ремонту. Например:\n\n"
+            "• Как выровнять стены гипсокартоном?\n"
+            "• Нужна ли гидроизоляция в ванной под плитку?\n"
+            "• Какой краской покрасить деревянный пол?\n\n"
+            "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
+        )
+    else:
+        # Показываем количество оставшихся вопросов
+        remaining = 10 - history_count
+        await query.edit_message_text(
+            f"📝 **Вопрос {history_count + 1} из 10** (осталось: {remaining})\n\n"
+            "Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
+            "• Как выровнять стены гипсокартоном?\n"
+            "• Нужна ли гидроизоляция в ванной под плитку?\n"
+            "• Какой краской покрасить деревянный пол?\n\n"
+            "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
+        )
+    
     context.user_data["in_consultation"] = True
 
 # === Поиск релевантных фрагментов ===
@@ -329,12 +387,16 @@ async def handle_feedback_rating(update: Update, context: ContextTypes.DEFAULT_T
     # Сохраняем оценку
     save_feedback(update.effective_user.id, interaction_id, rating, None)
     
+    # Получаем текущий прогресс
+    conversation_history = context.user_data.get('conversation_history', [])
+    history_count = len(conversation_history)
+    
     await query.edit_message_text(
         f"✅ Спасибо за оценку {rating} звезд! "
         "Если хотите, можете оставить комментарий (просто напишите его в следующем сообщении). "
         "Или нажмите кнопку для нового вопроса.",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("💬 Новый вопрос", callback_data="ask")
+            InlineKeyboardButton(f"💬 Новый вопрос ({history_count}/10)", callback_data="ask")
         ]])
     )
     
@@ -360,10 +422,14 @@ async def handle_feedback_comment(update: Update, context: ContextTypes.DEFAULT_
     conn.commit()
     conn.close()
     
+    # Получаем текущий прогресс
+    conversation_history = context.user_data.get('conversation_history', [])
+    history_count = len(conversation_history)
+    
     await update.message.reply_text(
         "✅ Спасибо за комментарий! Ваше мнение поможет улучшить качество консультаций.",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("💬 Новый вопрос", callback_data="ask")
+            InlineKeyboardButton(f"💬 Новый вопрос ({history_count}/10)", callback_data="ask")
         ]])
     )
     
@@ -487,6 +553,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         knowledge_context = "Нет релевантной информации в базе знаний."
 
+    # Получаем контекст диалога
+    conversation_context = get_conversation_context(context.user_data)
+    
     # Системный промпт с указанием года
     current_year = datetime.now().year
     system_prompt = (
@@ -499,14 +568,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "МАКСИМУМ — 400 слов."
     )
 
+    # Формируем промпт с учетом истории диалога
+    if conversation_context:
+        conversation_part = f"Предыдущий диалог с клиентом:\n{conversation_context}\n\n"
+    else:
+        conversation_part = ""
+
     if online_context or relevant_chunks:
         user_prompt = (
+            f"{conversation_part}"
             f"Информация из строительных нормативов:\n{knowledge_context}\n\n"
-            f"Вопрос клиента: {user_text}\n\n"
+            f"Текущий вопрос клиента: {user_text}\n\n"
             f"Ответь на русском языке, без лишних слов."
         )
     else:
-        user_prompt = f"Вопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
+        user_prompt = f"{conversation_part}Текущий вопрос клиента: {user_text}\n\nОтветь на русском языке, без лишних слов."
 
     await update.message.reply_text("⏳ Минутку, мне нужно подумать...")
     logging.info(f"Отправляю запрос к OpenRouter: {user_prompt[:200]}...")
@@ -549,6 +625,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         answer
                     )
                     
+                    # Добавляем в историю диалога
+                    add_to_conversation_history(context.user_data, user_text, answer)
+                    
                     # Проверяем, нужно ли запросить обратную связь (после 3-го взаимодействия)
                     interaction_count = get_user_interaction_count(user.id)
                     
@@ -576,7 +655,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         context.user_data["current_interaction_id"] = interaction_id
                     else:
                         # Обычный ответ с кнопкой нового вопроса
-                        keyboard = [[InlineKeyboardButton("🔄 Задать новый вопрос", callback_data="ask")]]
+                        conversation_history = context.user_data.get('conversation_history', [])
+                        history_count = len(conversation_history)
+                        remaining = 10 - history_count
+                        
+                        button_text = f"💬 Новый вопрос ({history_count}/10)"
+                        keyboard = [[InlineKeyboardButton(button_text, callback_data="ask")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await update.message.reply_text(
                             answer,
