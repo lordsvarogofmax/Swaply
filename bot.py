@@ -256,7 +256,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Расчёте смет и сроков\n\n"
         "• Отвечу на вопросы по СНиПам и ГОСТам\n\n"
         "💬 **Система диалога**: Я помню контекст наших разговоров и могу отвечать на уточняющие вопросы. "
-        "Поддерживаю ветку из **10 вопросов-ответов**, после чего память очищается.\n\n"
+        "Поддерживаю историю диалога для более точных ответов.\n\n"
         "⚠️ **Примечание**: я отвечаю **только по теме строительства и ремонта**.\n\n"
         "Готов помочь вам с реальной задачей — просто опишите её."
     )
@@ -277,7 +277,7 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если достигли лимита в 10 пар, очищаем историю
         clear_conversation_history(context.user_data)
         await query.edit_message_text(
-            "🔄 **История диалога очищена** (достигнут лимит в 10 вопросов)\n\n"
+            "🔄 **История диалога очищена**\n\n"
             "📝 Напишите ваш новый вопрос по строительству или ремонту. Например:\n\n"
             "• Как выровнять стены гипсокартоном?\n"
             "• Нужна ли гидроизоляция в ванной под плитку?\n"
@@ -285,11 +285,8 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
         )
     else:
-        # Показываем количество оставшихся вопросов
-        remaining = 10 - history_count
         await query.edit_message_text(
-            f"📝 **Вопрос {history_count + 1} из 10** (осталось: {remaining})\n\n"
-            "Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
+            "📝 Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
             "• Как выровнять стены гипсокартоном?\n"
             "• Нужна ли гидроизоляция в ванной под плитку?\n"
             "• Какой краской покрасить деревянный пол?\n\n"
@@ -387,17 +384,22 @@ async def handle_feedback_rating(update: Update, context: ContextTypes.DEFAULT_T
     # Сохраняем оценку
     save_feedback(update.effective_user.id, interaction_id, rating, None)
     
-    # Получаем текущий прогресс
-    conversation_history = context.user_data.get('conversation_history', [])
-    history_count = len(conversation_history)
-    
     await query.edit_message_text(
         f"✅ Спасибо за оценку {rating} звезд! "
-        "Если хотите, можете оставить комментарий (просто напишите его в следующем сообщении). "
-        "Или нажмите кнопку для нового вопроса.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"💬 Новый вопрос ({history_count}/10)", callback_data="ask")
-        ]])
+        "Теперь вы можете оставить комментарий или задать новый вопрос.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Задать новый вопрос", callback_data="ask")],
+            [InlineKeyboardButton("📝 Оставить комментарий", callback_data="comment")]
+        ])
+    )
+
+async def handle_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "📝 Пожалуйста, напишите ваш комментарий к оценке. "
+        "Ваше мнение поможет улучшить качество консультаций."
     )
     
     # Устанавливаем состояние ожидания комментария
@@ -422,14 +424,10 @@ async def handle_feedback_comment(update: Update, context: ContextTypes.DEFAULT_
     conn.commit()
     conn.close()
     
-    # Получаем текущий прогресс
-    conversation_history = context.user_data.get('conversation_history', [])
-    history_count = len(conversation_history)
-    
     await update.message.reply_text(
         "✅ Спасибо за комментарий! Ваше мнение поможет улучшить качество консультаций.",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"💬 Новый вопрос ({history_count}/10)", callback_data="ask")
+            InlineKeyboardButton("💬 Задать новый вопрос", callback_data="ask")
         ]])
     )
     
@@ -659,8 +657,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         history_count = len(conversation_history)
                         remaining = 10 - history_count
                         
-                        button_text = f"💬 Новый вопрос ({history_count}/10)"
-                        keyboard = [[InlineKeyboardButton(button_text, callback_data="ask")]]
+                        keyboard = [[InlineKeyboardButton("💬 Задать новый вопрос", callback_data="ask")]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await update.message.reply_text(
                             answer,
@@ -695,6 +692,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", handle_admin_stats))
 application.add_handler(CallbackQueryHandler(ask_callback, pattern="^ask$"))
 application.add_handler(CallbackQueryHandler(handle_feedback_rating, pattern="^rating_"))
+application.add_handler(CallbackQueryHandler(handle_comment_callback, pattern="^comment$"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 _loop = asyncio.new_event_loop()
