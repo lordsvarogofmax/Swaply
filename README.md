@@ -14,30 +14,53 @@
 ```bash
 pip install -r requirements.txt
 ```
-3) Создайте файл `.env` по образцу ниже и заполните токены:
+3) Создайте файл `.env` с переменными окружения:
 ```env
-BOT_TOKEN=123456:telegram-bot-token
-OPENROUTER_API_KEY=sk-or-xxxx
+BOT_TOKEN=ваш_токен_от_botfather
+OPENROUTER_API_KEY=ваш_ключ_openrouter
 OPENROUTER_MODEL=meta-llama/llama-3.1-70b-instruct
+ADMIN_ID=364191893
 PORT=10000
 ```
+
+**Как получить токены:**
+- **BOT_TOKEN**: Создайте бота через [@BotFather](https://t.me/BotFather) в Telegram
+- **OPENROUTER_API_KEY**: Получите на [OpenRouter.ai](https://openrouter.ai/)
 4) Добавьте файлы знаний в `base_knowledge/*.txt` (уже есть примеры).
 5) Запустите локально:
 ```bash
 python bot.py
 ```
 
-### Деплой
-- Приложение стартует Flask-сервером (`/health`, и `/<BOT_TOKEN>` как endpoint для вебхука Telegram).
-- Настройте у Telegram вебхук на `https://<ваш-домен>/<BOT_TOKEN>`.
+### Деплой на Render.com
+1. **Создайте Web Service** на [Render.com](https://render.com/)
+2. **Подключите GitHub репозиторий**
+3. **Настройте переменные окружения** в панели Render:
+   - `BOT_TOKEN` - токен от BotFather
+   - `OPENROUTER_API_KEY` - ключ от OpenRouter
+   - `ADMIN_ID` - 364191893
+   - `PORT` - 10000
+4. **Настройте вебхук Telegram**:
+   - URL: `https://<ваш-домен>.onrender.com/<BOT_TOKEN>`
+   - Метод: POST
+5. **Приложение стартует Flask-сервером** (`/health`, и `/<BOT_TOKEN>` как endpoint для вебхука Telegram).
+
+### Настройка вебхука Telegram
+После деплоя настройте вебхук через BotFather:
+```
+/setwebhook
+URL: https://ваш-домен.onrender.com/ваш-BOT-TOKEN
+```
 
 ### Дополнительно
 - Подготовка знаний из PDF: `prepare_knowledge.py` создаёт `knowledge_chunks.json` (пример обработки, не используется напрямую ботом).
 - Зависимости: см. `requirements.txt` (в т.ч. `python-dotenv`, `PyPDF2`).
+- База знаний: автоматически загружаются все `.txt` файлы из папки `base_knowledge/`
 
 ### Безопасность
 - Секреты не хардкожены — используйте `.env`.
 - Не коммитьте `.env` в репозиторий.
+- Админские функции доступны только пользователю с `ADMIN_ID`.
 
 
 

@@ -33,7 +33,20 @@ MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "364191893"))
 
 if not BOT_TOKEN or not OPENROUTER_API_KEY:
-    logging.warning("Переменные окружения BOT_TOKEN или OPENROUTER_API_KEY не заданы. Установите их в .env")
+    error_msg = "❌ ОШИБКА КОНФИГУРАЦИИ:\n"
+    if not BOT_TOKEN:
+        error_msg += "• BOT_TOKEN не задан\n"
+    if not OPENROUTER_API_KEY:
+        error_msg += "• OPENROUTER_API_KEY не задан\n"
+    error_msg += "\nСоздайте файл .env с переменными:\n"
+    error_msg += "BOT_TOKEN=ваш_токен_от_botfather\n"
+    error_msg += "OPENROUTER_API_KEY=ваш_ключ_openrouter\n"
+    error_msg += "ADMIN_ID=364191893\n"
+    error_msg += "PORT=10000"
+    
+    print(error_msg)
+    logging.error(error_msg)
+    exit(1)
 
 # === База данных ===
 def init_database():
