@@ -24,7 +24,7 @@ def extract_chunks(pdf_path, chunk_size=500):
     return chunks
 
 all_chunks = []
-for filename in ["kniga-1.pdf", "kniga-2.pdf", "kniga-3.pdf", "kniga-4.pdf", "kniga-5.pdf"]:
+for filename in ["kniga-1.txt", "kniga-2.txt", "kniga-3.txt", "kniga-4.txt", "kniga-5.txt", "kniga-s1.txt", "kniga-s4.txt", "kniga-s2.txt", "kniga-s5.txt", "kniga-s3.txt"]:
     if os.path.exists(filename):
         print(f"Обрабатываю {filename}...")
         chunks = extract_chunks(filename)
