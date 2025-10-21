@@ -632,11 +632,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if interaction_count == 3 and not has_given_feedback(user.id, interaction_id):
                         # Показываем запрос на оценку
                         keyboard = [
-                            [InlineKeyboardButton("⭐ 1", callback_data="rating_1")],
-                            [InlineKeyboardButton("⭐⭐ 2", callback_data="rating_2")],
-                            [InlineKeyboardButton("⭐⭐⭐ 3", callback_data="rating_3")],
-                            [InlineKeyboardButton("⭐⭐⭐⭐ 4", callback_data="rating_4")],
-                            [InlineKeyboardButton("⭐⭐⭐⭐⭐ 5", callback_data="rating_5")]
+                            [InlineKeyboardButton("⭐", callback_data="rating_1")]
+                            [InlineKeyboardButton("⭐⭐", callback_data="rating_2")]
+                            [InlineKeyboardButton("⭐⭐⭐", callback_data="rating_3")],
+                            [InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rating_4")]
+                            [InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rating_5")]
                         ]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         
