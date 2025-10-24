@@ -61,11 +61,21 @@ if not BOT_TOKEN or not OPENROUTER_API_KEY:
     error_msg += "BOT_TOKEN=ваш_токен_от_botfather\n"
     error_msg += "OPENROUTER_API_KEY=ваш_ключ_openrouter\n"
     error_msg += "ADMIN_ID=364191893\n"
-    error_msg += "PORT=10000"
+    error_msg += "PORT=10000\n"
+    error_msg += "\n# Email настройки (опционально):\n"
+    error_msg += "EMAIL_USERNAME=ваш_email@gmail.com\n"
+    error_msg += "EMAIL_PASSWORD=ваш_пароль_приложения"
     
     print(error_msg)
     logging.error(error_msg)
     exit(1)
+
+# Проверяем email настройки (не критично для работы бота)
+if not EMAIL_USERNAME or not EMAIL_PASSWORD:
+    logging.warning("Email настройки не заданы. Ежедневная статистика отключена.")
+    logging.warning("Для включения добавьте EMAIL_USERNAME и EMAIL_PASSWORD в .env")
+else:
+    logging.info(f"Email настройки настроены. Статистика будет отправляться на {ADMIN_EMAIL}")
 
 # === База данных ===
 def init_database():
@@ -280,7 +290,7 @@ def create_daily_stats_excel():
 
 • Всего взаимодействий: {len(df)}
 • Уникальных пользователей: {df['user_id'].nunique()}
-• Средняя оценка: {df['rating'].mean():.2f}" if not df['rating'].isna().all() else "Оценок пока нет"
+• Средняя оценка: {df['rating'].mean():.2f if not df['rating'].isna().all() else 'Оценок пока нет'}
 • Количество оценок: {df['rating'].notna().sum()}
 • Количество комментариев: {df['comment'].notna().sum()}
         """
@@ -967,9 +977,12 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(60)  # Проверяем каждую минуту
 
-# Запускаем планировщик в отдельном потоке
-scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-scheduler_thread.start()
+# Запускаем планировщик только при наличии email настроек
+if EMAIL_USERNAME and EMAIL_PASSWORD:
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+else:
+    logging.info("Планировщик задач не запущен - отсутствуют email настройки")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
