@@ -7,6 +7,9 @@
 - Ретрив по локальным текстам с TF‑IDF
 - Поиск свежих нормативов на `docs.cntd.ru`
 - Вебхук через Flask для Telegram
+- **Ежедневная статистика на email в 17:30 МСК**
+- Система обратной связи после каждого ответа
+- История диалога до 10 вопросов
 
 ### Быстрый старт
 1) Установите Python 3.11 (см. `runtime.txt`).
@@ -21,11 +24,19 @@ OPENROUTER_API_KEY=ваш_ключ_openrouter
 OPENROUTER_MODEL=meta-llama/llama-3.1-70b-instruct
 ADMIN_ID=364191893
 PORT=10000
+
+# Email настройки (для ежедневной статистики)
+EMAIL_SMTP_SERVER=smtp.gmail.com
+EMAIL_SMTP_PORT=587
+EMAIL_USERNAME=ваш_email@gmail.com
+EMAIL_PASSWORD=ваш_пароль_приложения
+ADMIN_EMAIL=maximfine32@gmail.com
 ```
 
 **Как получить токены:**
 - **BOT_TOKEN**: Создайте бота через [@BotFather](https://t.me/BotFather) в Telegram
 - **OPENROUTER_API_KEY**: Получите на [OpenRouter.ai](https://openrouter.ai/)
+- **EMAIL_PASSWORD**: Для Gmail используйте [пароль приложения](https://support.google.com/accounts/answer/185833)
 4) Добавьте файлы знаний в `base_knowledge/*.txt` (уже есть примеры).
 5) Запустите локально:
 ```bash

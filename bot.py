@@ -28,6 +28,14 @@ from openpyxl.styles import Font, Alignment
 import tempfile
 import time
 from collections import defaultdict
+import schedule
+import pytz
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import atexit
 
 # === Настройки ===
 load_dotenv()
@@ -35,6 +43,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "364191893"))
+
+# Email настройки
+EMAIL_SMTP_SERVER = os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com")
+EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
+EMAIL_USERNAME = os.environ.get("EMAIL_USERNAME", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "maximfine32@gmail.com")
 
 if not BOT_TOKEN or not OPENROUTER_API_KEY:
     error_msg = "❌ ОШИБКА КОНФИГУРАЦИИ:\n"
@@ -203,6 +218,141 @@ def get_admin_stats(days=30):
         df = pd.read_sql_query(query, conn)
         conn.close()
         return df
+
+# === Функции для работы с email ===
+def create_daily_stats_excel():
+    """Создает Excel файл со статистикой за последние 30 дней"""
+    try:
+        df = get_admin_stats(30)
+        
+        if df.empty:
+            return None, "Нет данных за последние 30 дней"
+        
+        # Создаем Excel файл
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Статистика бота"
+        
+        # Заголовки
+        headers = [
+            "ID пользователя", "Имя пользователя", "Имя", "Фамилия", 
+            "Вопрос", "Ответ", "Дата/время", "Оценка", "Комментарий"
+        ]
+        
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Данные
+        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
+            ws.cell(row=row_idx, column=1, value=row['user_id'])
+            ws.cell(row=row_idx, column=2, value=row['username'] or '')
+            ws.cell(row=row_idx, column=3, value=row['first_name'] or '')
+            ws.cell(row=row_idx, column=4, value=row['last_name'] or '')
+            ws.cell(row=row_idx, column=5, value=row['question'][:100] + '...' if len(str(row['question'])) > 100 else row['question'])
+            ws.cell(row=row_idx, column=6, value=row['answer'][:100] + '...' if len(str(row['answer'])) > 100 else row['answer'])
+            ws.cell(row=row_idx, column=7, value=row['timestamp'])
+            ws.cell(row=row_idx, column=8, value=row['rating'] if pd.notna(row['rating']) else 'Нет оценки')
+            ws.cell(row=row_idx, column=9, value=row['comment'] or '')
+        
+        # Автоширина колонок
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+            wb.save(tmp_file.name)
+            tmp_file_path = tmp_file.name
+        
+        # Статистика для текста письма
+        stats_text = f"""
+📊 Статистика использования бота за последние 30 дней:
+
+• Всего взаимодействий: {len(df)}
+• Уникальных пользователей: {df['user_id'].nunique()}
+• Средняя оценка: {df['rating'].mean():.2f}" if not df['rating'].isna().all() else "Оценок пока нет"
+• Количество оценок: {df['rating'].notna().sum()}
+• Количество комментариев: {df['comment'].notna().sum()}
+        """
+        
+        return tmp_file_path, stats_text.strip()
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании статистики: {e}")
+        return None, f"Ошибка при создании статистики: {e}"
+
+def send_email_with_stats():
+    """Отправляет email со статистикой"""
+    try:
+        if not EMAIL_USERNAME or not EMAIL_PASSWORD:
+            logging.warning("Email настройки не заданы, пропускаем отправку статистики")
+            return
+        
+        # Создаем Excel файл
+        excel_path, stats_text = create_daily_stats_excel()
+        
+        if not excel_path:
+            logging.error("Не удалось создать Excel файл для статистики")
+            return
+        
+        # Создаем сообщение
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USERNAME
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"📊 Ежедневная статистика бота - {datetime.now(pytz.timezone('Europe/Moscow')).strftime('%d.%m.%Y')}"
+        
+        # Текст письма
+        body = f"""
+Привет!
+
+{stats_text}
+
+Файл со статистикой прикреплен к письму.
+
+С уважением,
+Бот ПрорабМаксимыч
+        """
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        # Прикрепляем Excel файл
+        with open(excel_path, 'rb') as attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename= bot_statistics_{datetime.now().strftime("%Y%m%d")}.xlsx'
+            )
+            msg.attach(part)
+        
+        # Отправляем email
+        server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(EMAIL_USERNAME, ADMIN_EMAIL, text)
+        server.quit()
+        
+        # Удаляем временный файл
+        os.unlink(excel_path)
+        
+        logging.info(f"Статистика успешно отправлена на {ADMIN_EMAIL}")
+        
+    except Exception as e:
+        logging.error(f"Ошибка при отправке email: {e}")
+
+# === Функции для работы с историей диалога ===
 
 # === Функции для работы с историей диалога ===
 def add_to_conversation_history(user_data, question, answer):
@@ -804,6 +954,22 @@ def cleanup_resources():
 
 # Регистрируем функцию очистки
 atexit.register(cleanup_resources)
+
+# === Планировщик задач ===
+def run_scheduler():
+    """Запускает планировщик задач в отдельном потоке"""
+    # Настраиваем задачу на 17:30 по московскому времени
+    schedule.every().day.at("17:30").do(send_email_with_stats)
+    
+    logging.info("Планировщик задач запущен. Статистика будет отправляться ежедневно в 17:30 по МСК")
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # Проверяем каждую минуту
+
+# Запускаем планировщик в отдельном потоке
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -7,3 +7,7 @@ python-dotenv
 PyPDF2
 pandas
 openpyxl
+schedule
+pytz
+smtplib-ssl
+email-validator
