@@ -30,11 +30,6 @@ import time
 from collections import defaultdict
 import schedule
 import pytz
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 import atexit
 
 # === Настройки ===
@@ -43,13 +38,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "364191893"))
-
-# Email настройки
-EMAIL_SMTP_SERVER = os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com")
-EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
-EMAIL_USERNAME = os.environ.get("EMAIL_USERNAME", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "maximfine32@gmail.com")
 
 if not BOT_TOKEN or not OPENROUTER_API_KEY:
     error_msg = "❌ ОШИБКА КОНФИГУРАЦИИ:\n"
@@ -61,21 +49,13 @@ if not BOT_TOKEN or not OPENROUTER_API_KEY:
     error_msg += "BOT_TOKEN=ваш_токен_от_botfather\n"
     error_msg += "OPENROUTER_API_KEY=ваш_ключ_openrouter\n"
     error_msg += "ADMIN_ID=364191893\n"
-    error_msg += "PORT=10000\n"
-    error_msg += "\n# Email настройки (опционально):\n"
-    error_msg += "EMAIL_USERNAME=ваш_email@gmail.com\n"
-    error_msg += "EMAIL_PASSWORD=ваш_пароль_приложения"
+    error_msg += "PORT=10000"
     
     print(error_msg)
     logging.error(error_msg)
     exit(1)
 
-# Проверяем email настройки (не критично для работы бота)
-if not EMAIL_USERNAME or not EMAIL_PASSWORD:
-    logging.warning("Email настройки не заданы. Ежедневная статистика отключена.")
-    logging.warning("Для включения добавьте EMAIL_USERNAME и EMAIL_PASSWORD в .env")
-else:
-    logging.info(f"Email настройки настроены. Статистика будет отправляться на {ADMIN_EMAIL}")
+logging.info(f"Бот настроен. Админ ID: {ADMIN_ID}")
 
 # === База данных ===
 def init_database():
@@ -229,138 +209,82 @@ def get_admin_stats(days=30):
         conn.close()
         return df
 
-# === Функции для работы с email ===
-def create_daily_stats_excel():
-    """Создает Excel файл со статистикой за последние 30 дней"""
+# === Функции для работы с Telegram статистикой ===
+def get_daily_stats():
+    """Получает статистику за последние 24 часа"""
     try:
-        df = get_admin_stats(30)
+        df = get_admin_stats(1)  # За последние 24 часа
         
         if df.empty:
-            return None, "Нет данных за последние 30 дней"
+            return "📊 **Статистика за последние 24 часа:**\n\nНет данных за этот период."
         
-        # Создаем Excel файл
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Статистика бота"
+        # Статистика
+        total_interactions = len(df)
+        unique_users = df['user_id'].nunique()
+        ratings_count = df['rating'].notna().sum()
+        comments_count = df['comment'].notna().sum()
+        avg_rating = df['rating'].mean() if ratings_count > 0 else 0
         
-        # Заголовки
-        headers = [
-            "ID пользователя", "Имя пользователя", "Имя", "Фамилия", 
-            "Вопрос", "Ответ", "Дата/время", "Оценка", "Комментарий"
-        ]
+        # Топ пользователей по активности
+        top_users = df.groupby('user_id').size().sort_values(ascending=False).head(3)
+        top_users_text = ""
+        for user_id, count in top_users.items():
+            user_info = df[df['user_id'] == user_id].iloc[0]
+            username = user_info['username'] or f"ID{user_id}"
+            name = user_info['first_name'] or ""
+            top_users_text += f"• {username} ({name}): {count} вопросов\n"
         
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal='center')
+        # Топ вопросов
+        top_questions = df['question'].value_counts().head(3)
+        top_questions_text = ""
+        for question, count in top_questions.items():
+            short_q = question[:50] + "..." if len(question) > 50 else question
+            top_questions_text += f"• \"{short_q}\": {count} раз\n"
         
-        # Данные
-        for row_idx, (_, row) in enumerate(df.iterrows(), 2):
-            ws.cell(row=row_idx, column=1, value=row['user_id'])
-            ws.cell(row=row_idx, column=2, value=row['username'] or '')
-            ws.cell(row=row_idx, column=3, value=row['first_name'] or '')
-            ws.cell(row=row_idx, column=4, value=row['last_name'] or '')
-            ws.cell(row=row_idx, column=5, value=row['question'][:100] + '...' if len(str(row['question'])) > 100 else row['question'])
-            ws.cell(row=row_idx, column=6, value=row['answer'][:100] + '...' if len(str(row['answer'])) > 100 else row['answer'])
-            ws.cell(row=row_idx, column=7, value=row['timestamp'])
-            ws.cell(row=row_idx, column=8, value=row['rating'] if pd.notna(row['rating']) else 'Нет оценки')
-            ws.cell(row=row_idx, column=9, value=row['comment'] or '')
-        
-        # Автоширина колонок
-        for column in ws.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)
-            ws.column_dimensions[column_letter].width = adjusted_width
-        
-        # Сохраняем во временный файл
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-            wb.save(tmp_file.name)
-            tmp_file_path = tmp_file.name
-        
-        # Статистика для текста письма
-        stats_text = f"""
-📊 Статистика использования бота за последние 30 дней:
+        stats_text = f"""📊 **Ежедневная статистика бота**
+📅 {datetime.now(pytz.timezone('Europe/Moscow')).strftime('%d.%m.%Y %H:%M')} МСК
 
-• Всего взаимодействий: {len(df)}
-• Уникальных пользователей: {df['user_id'].nunique()}
-• Средняя оценка: {df['rating'].mean():.2f if not df['rating'].isna().all() else 'Оценок пока нет'}
-• Количество оценок: {df['rating'].notna().sum()}
-• Количество комментариев: {df['comment'].notna().sum()}
-        """
+**📈 Общая статистика:**
+• Всего взаимодействий: {total_interactions}
+• Уникальных пользователей: {unique_users}
+• Оценок получено: {ratings_count}
+• Комментариев: {comments_count}
+• Средняя оценка: {avg_rating:.1f}/5.0
+
+**👥 Самые активные пользователи:**
+{top_users_text}
+
+**❓ Популярные вопросы:**
+{top_questions_text}
+
+**💬 Система обратной связи:**
+• Процент оцененных ответов: {(ratings_count/total_interactions*100):.1f}%
+• Процент с комментариями: {(comments_count/total_interactions*100):.1f}%"""
         
-        return tmp_file_path, stats_text.strip()
+        return stats_text
         
     except Exception as e:
         logging.error(f"Ошибка при создании статистики: {e}")
-        return None, f"Ошибка при создании статистики: {e}"
+        return f"❌ Ошибка при создании статистики: {e}"
 
-def send_email_with_stats():
-    """Отправляет email со статистикой"""
+async def send_daily_stats_to_admin():
+    """Отправляет ежедневную статистику администратору в Telegram"""
     try:
-        if not EMAIL_USERNAME or not EMAIL_PASSWORD:
-            logging.warning("Email настройки не заданы, пропускаем отправку статистики")
-            return
+        stats_text = get_daily_stats()
         
-        # Создаем Excel файл
-        excel_path, stats_text = create_daily_stats_excel()
+        # Отправляем сообщение администратору
+        await application.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=stats_text,
+            parse_mode="Markdown"
+        )
         
-        if not excel_path:
-            logging.error("Не удалось создать Excel файл для статистики")
-            return
-        
-        # Создаем сообщение
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USERNAME
-        msg['To'] = ADMIN_EMAIL
-        msg['Subject'] = f"📊 Ежедневная статистика бота - {datetime.now(pytz.timezone('Europe/Moscow')).strftime('%d.%m.%Y')}"
-        
-        # Текст письма
-        body = f"""
-Привет!
-
-{stats_text}
-
-Файл со статистикой прикреплен к письму.
-
-С уважением,
-Бот ПрорабМаксимыч
-        """
-        
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        # Прикрепляем Excel файл
-        with open(excel_path, 'rb') as attachment:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename= bot_statistics_{datetime.now().strftime("%Y%m%d")}.xlsx'
-            )
-            msg.attach(part)
-        
-        # Отправляем email
-        server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-        text = msg.as_string()
-        server.sendmail(EMAIL_USERNAME, ADMIN_EMAIL, text)
-        server.quit()
-        
-        # Удаляем временный файл
-        os.unlink(excel_path)
-        
-        logging.info(f"Статистика успешно отправлена на {ADMIN_EMAIL}")
+        logging.info(f"Ежедневная статистика отправлена администратору (ID: {ADMIN_ID})")
         
     except Exception as e:
-        logging.error(f"Ошибка при отправке email: {e}")
+        logging.error(f"Ошибка при отправке статистики администратору: {e}")
+
+# === Функции для работы с историей диалога ===
 
 # === Функции для работы с историей диалога ===
 
@@ -969,20 +893,17 @@ atexit.register(cleanup_resources)
 def run_scheduler():
     """Запускает планировщик задач в отдельном потоке"""
     # Настраиваем задачу на 17:30 по московскому времени
-    schedule.every().day.at("17:30").do(send_email_with_stats)
+    schedule.every().day.at("17:30").do(lambda: asyncio.run(send_daily_stats_to_admin()))
     
-    logging.info("Планировщик задач запущен. Статистика будет отправляться ежедневно в 17:30 по МСК")
+    logging.info("Планировщик задач запущен. Статистика будет отправляться ежедневно в 17:30 по МСК в Telegram")
     
     while True:
         schedule.run_pending()
         time.sleep(60)  # Проверяем каждую минуту
 
-# Запускаем планировщик только при наличии email настроек
-if EMAIL_USERNAME and EMAIL_PASSWORD:
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-else:
-    logging.info("Планировщик задач не запущен - отсутствуют email настройки")
+# Запускаем планировщик
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
