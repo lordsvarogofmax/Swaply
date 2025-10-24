@@ -3,6 +3,8 @@ import logging
 import asyncio
 import sqlite3
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -24,6 +26,8 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 import tempfile
+import time
+from collections import defaultdict
 
 # === Настройки ===
 load_dotenv()
@@ -74,11 +78,12 @@ def init_database():
         CREATE TABLE IF NOT EXISTS feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            interaction_id INTEGER,
+            interaction_id INTEGER NOT NULL,
             rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
             comment TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (interaction_id) REFERENCES user_interactions (id)
+            FOREIGN KEY (interaction_id) REFERENCES user_interactions (id),
+            UNIQUE(user_id, interaction_id)
         )
     ''')
     
@@ -88,80 +93,116 @@ def init_database():
 # Инициализируем базу данных
 init_database()
 
+# === Система управления пользователями и rate limiting ===
+# Словарь для отслеживания последней активности пользователей
+user_last_activity = defaultdict(float)
+# Словарь для подсчета запросов пользователей за минуту
+user_request_counts = defaultdict(int)
+# Блокировка для потокобезопасности
+db_lock = threading.Lock()
+
+# Rate limiting: максимум 10 запросов в минуту на пользователя
+MAX_REQUESTS_PER_MINUTE = 10
+RATE_LIMIT_WINDOW = 60  # секунд
+
+def check_rate_limit(user_id):
+    """Проверяет rate limit для пользователя"""
+    current_time = time.time()
+    
+    # Очищаем старые записи (старше минуты)
+    if user_id in user_last_activity:
+        if current_time - user_last_activity[user_id] > RATE_LIMIT_WINDOW:
+            user_request_counts[user_id] = 0
+            user_last_activity[user_id] = current_time
+    
+    # Проверяем лимит
+    if user_request_counts[user_id] >= MAX_REQUESTS_PER_MINUTE:
+        return False
+    
+    # Увеличиваем счетчик
+    user_request_counts[user_id] += 1
+    user_last_activity[user_id] = current_time
+    return True
+
 # === Вспомогательные функции для работы с БД ===
 def save_interaction(user_id, username, first_name, last_name, question, answer, session_id=None):
-    conn = sqlite3.connect('bot_feedback.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO user_interactions (user_id, username, first_name, last_name, question, answer, session_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, last_name, question, answer, session_id))
-    interaction_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return interaction_id
+    with db_lock:
+        conn = sqlite3.connect('bot_feedback.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO user_interactions (user_id, username, first_name, last_name, question, answer, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, last_name, question, answer, session_id))
+        interaction_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return interaction_id
 
 def save_feedback(user_id, interaction_id, rating, comment):
-    conn = sqlite3.connect('bot_feedback.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO feedback (user_id, interaction_id, rating, comment)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, interaction_id, rating, comment))
-    
-    # Отмечаем, что обратная связь была дана
-    cursor.execute('''
-        UPDATE user_interactions SET feedback_given = TRUE WHERE id = ?
-    ''', (interaction_id,))
-    
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect('bot_feedback.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO feedback (user_id, interaction_id, rating, comment)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, interaction_id, rating, comment))
+        
+        # Отмечаем, что обратная связь была дана
+        cursor.execute('''
+            UPDATE user_interactions SET feedback_given = TRUE WHERE id = ?
+        ''', (interaction_id,))
+        
+        conn.commit()
+        conn.close()
 
 def get_user_interaction_count(user_id, days=30):
-    conn = sqlite3.connect('bot_feedback.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COUNT(*) FROM user_interactions 
-        WHERE user_id = ? AND timestamp >= datetime('now', '-{} days')
-    '''.format(days), (user_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    with db_lock:
+        conn = sqlite3.connect('bot_feedback.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM user_interactions 
+            WHERE user_id = ? AND timestamp >= datetime('now', '-{} days')
+        '''.format(days), (user_id,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
 
 def has_given_feedback(user_id, interaction_id):
-    conn = sqlite3.connect('bot_feedback.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COUNT(*) FROM feedback WHERE user_id = ? AND interaction_id = ?
-    ''', (user_id, interaction_id))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count > 0
+    with db_lock:
+        conn = sqlite3.connect('bot_feedback.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM feedback WHERE user_id = ? AND interaction_id = ?
+        ''', (user_id, interaction_id))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
 
 def get_admin_stats(days=30):
-    conn = sqlite3.connect('bot_feedback.db')
-    
-    # Получаем статистику за последние N дней
-    query = '''
-        SELECT 
-            ui.user_id,
-            ui.username,
-            ui.first_name,
-            ui.last_name,
-            ui.question,
-            ui.answer,
-            ui.timestamp,
-            f.rating,
-            f.comment
-        FROM user_interactions ui
-        LEFT JOIN feedback f ON ui.id = f.interaction_id
-        WHERE ui.timestamp >= datetime('now', '-{} days')
-        ORDER BY ui.timestamp DESC
-    '''.format(days)
-    
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+    with db_lock:
+        conn = sqlite3.connect('bot_feedback.db')
+        
+        # Получаем статистику за последние N дней
+        query = '''
+            SELECT 
+                ui.user_id,
+                ui.username,
+                ui.first_name,
+                ui.last_name,
+                ui.question,
+                ui.answer,
+                ui.timestamp,
+                f.rating,
+                f.comment
+            FROM user_interactions ui
+            LEFT JOIN feedback f ON ui.id = f.interaction_id
+            WHERE ui.timestamp >= datetime('now', '-{} days')
+            ORDER BY ui.timestamp DESC
+        '''.format(days)
+        
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
 
 # === Функции для работы с историей диалога ===
 def add_to_conversation_history(user_data, question, answer):
@@ -276,16 +317,16 @@ async def ask_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if history_count >= 10:
         # Если достигли лимита в 10 пар, очищаем историю
         clear_conversation_history(context.user_data)
-        await query.edit_message_text(
+        await query.message.reply_text(
             "🔄 **История диалога очищена**\n\n"
-            "📝 Напишите ваш новый вопрос по строительству или ремонту. Например:\n\n"
+            "📝 Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
             "• Как выровнять стены гипсокартоном?\n"
             "• Нужна ли гидроизоляция в ванной под плитку?\n"
             "• Какой краской покрасить деревянный пол?\n\n"
             "Я дам развернутый, профессиональный ответ на основе строительных норм и справочников."
         )
     else:
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📝 Напишите ваш вопрос по строительству или ремонту. Например:\n\n"
             "• Как выровнять стены гипсокартоном?\n"
             "• Нужна ли гидроизоляция в ванной под плитку?\n"
@@ -305,68 +346,109 @@ def retrieve_relevant_chunks(query, top_k=3):
     top_indices = similarities.argsort()[-top_k:][::-1]
     return [_knowledge_chunks[i] for i in top_indices if similarities[i] > 0.1]
 
+# === Глобальные HTTP клиенты для оптимизации ===
+# Создаем глобальный HTTP клиент с пулом соединений
+http_client = httpx.AsyncClient(
+    timeout=30.0,
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+    follow_redirects=True
+)
+
 # === Ищет актуальные нормативные документы на docs.cntd.ru ===
 
 async def search_cntd(query: str, max_chars=1500) -> str:
     try:
-        async with httpx.AsyncClient(
-            timeout=10.0,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-            }
-        ) as client:
-            search_url = f"https://docs.cntd.ru/search?text={query}"
-            response = await client.get(search_url)
-            response.raise_for_status()
+        search_url = f"https://docs.cntd.ru/search?text={query}"
+        response = await http_client.get(search_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+        })
+        response.raise_for_status()
 
-            # Парсинг без изменений
-            tree = HTMLParser(response.text)
-            results = []
-            for item in tree.css("div.search-results__item"):
-                title_node = item.css_first("a")
-                if not title_node:
-                    continue
-                title = title_node.text().strip()
-                href = title_node.attributes.get("href")
-                if not href or not href.startswith("/document/"):
-                    continue
-                status_node = item.css_first("span.document-info__status")
-                status = status_node.text().strip().lower() if status_node else ""
-                if "отмен" in status or "не действует" in status:
-                    continue
-                results.append({"title": title, "url": "https://docs.cntd.ru" + href})
+        # Парсинг без изменений
+        tree = HTMLParser(response.text)
+        results = []
+        for item in tree.css("div.search-results__item"):
+            title_node = item.css_first("a")
+            if not title_node:
+                continue
+            title = title_node.text().strip()
+            href = title_node.attributes.get("href")
+            if not href or not href.startswith("/document/"):
+                continue
+            status_node = item.css_first("span.document-info__status")
+            status = status_node.text().strip().lower() if status_node else ""
+            if "отмен" in status or "не действует" in status:
+                continue
+            results.append({"title": title, "url": "https://docs.cntd.ru" + href})
 
-            if not results:
-                return ""
+        if not results:
+            return ""
 
-            doc_url = results[0]["url"]
-            doc_resp = await client.get(doc_url)
-            doc_tree = HTMLParser(doc_resp.text)
-            content = ""
-            for p in doc_tree.css("div.document-content p"):
-                text = p.text().strip()
-                if text and len(text) > 20:
-                    content += text + "\n"
-                    if len(content) > max_chars:
-                        break
+        doc_url = results[0]["url"]
+        doc_resp = await http_client.get(doc_url)
+        doc_tree = HTMLParser(doc_resp.text)
+        content = ""
+        for p in doc_tree.css("div.document-content p"):
+            text = p.text().strip()
+            if text and len(text) > 20:
+                content += text + "\n"
+                if len(content) > max_chars:
+                    break
 
-            return f"[Источник: {results[0]['title']}]\n{content[:max_chars]}..." if content else ""
+        return f"[Источник: {results[0]['title']}]\n{content[:max_chars]}..." if content else ""
 
     except Exception as e:
         logging.error(f"Ошибка поиска на cntd.ru: {e}")
         return ""
         
 # === Обработка обратной связи ===
+async def handle_feedback_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not query.data.startswith("feedback_"):
+        return
+    
+    interaction_id = int(query.data.split("_")[1])
+    
+    # Проверяем, не давал ли уже пользователь обратную связь
+    if has_given_feedback(update.effective_user.id, interaction_id):
+        await query.message.reply_text(
+            "✅ Вы уже оценили этот ответ. Спасибо за обратную связь!"
+        )
+        return
+    
+    # Сохраняем ID взаимодействия для обратной связи
+    context.user_data["current_interaction_id"] = interaction_id
+    
+    # Показываем кнопки оценки и комментария
+    keyboard = [
+        [InlineKeyboardButton("⭐", callback_data="rating_1"),
+         InlineKeyboardButton("⭐⭐", callback_data="rating_2"),
+         InlineKeyboardButton("⭐⭐⭐", callback_data="rating_3"),
+         InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rating_4"),
+         InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rating_5")],
+        [InlineKeyboardButton("📝 Оставить комментарий", callback_data="comment")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        "📊 **Пожалуйста, оцените качество ответа:**\n"
+        "Насколько полезной была информация? (1-5 звезд)\n\n"
+        "Вы также можете оставить комментарий.",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
 async def handle_feedback_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -384,7 +466,7 @@ async def handle_feedback_rating(update: Update, context: ContextTypes.DEFAULT_T
     # Сохраняем оценку
     save_feedback(update.effective_user.id, interaction_id, rating, None)
     
-    await query.edit_message_text(
+    await query.message.reply_text(
         f"✅ Спасибо за оценку {rating} звезд! "
         "Теперь вы можете оставить комментарий или задать новый вопрос.",
         reply_markup=InlineKeyboardMarkup([
@@ -397,7 +479,7 @@ async def handle_comment_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     
-    await query.edit_message_text(
+    await query.message.reply_text(
         "📝 Пожалуйста, напишите ваш комментарий к оценке. "
         "Ваше мнение поможет улучшить качество консультаций."
     )
@@ -515,6 +597,17 @@ async def handle_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # === Обработка текстовых сообщений ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Проверяем rate limit
+    if not check_rate_limit(user_id):
+        await update.message.reply_text(
+            "⚠️ **Слишком много запросов!**\n\n"
+            "Вы превысили лимит в 10 запросов в минуту. "
+            "Пожалуйста, подождите немного перед следующим вопросом."
+        )
+        return
+    
     # Проверяем, ждем ли мы комментарий
     if context.user_data.get("waiting_for_comment"):
         await handle_feedback_comment(update, context)
@@ -593,20 +686,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_error = None
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": MODEL,
-                            "messages": messages,
-                            "max_tokens": 1000,
-                            "temperature": 0.3
-                        }
-                    )
+                response = await http_client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": MODEL,
+                        "messages": messages,
+                        "max_tokens": 1000,
+                        "temperature": 0.3
+                    }
+                )
                 if response.status_code == 200:
                     data = response.json()
                     answer = data["choices"][0]["message"]["content"].strip()
@@ -626,38 +718,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Добавляем в историю диалога
                     add_to_conversation_history(context.user_data, user_text, answer)
                     
-                    # Проверяем, нужно ли запросить обратную связь (после 3-го взаимодействия)
-                    interaction_count = get_user_interaction_count(user.id)
+                    # Проверяем, давал ли пользователь обратную связь по этому ответу
+                    feedback_given = has_given_feedback(user.id, interaction_id)
                     
-                    if interaction_count == 3 and not has_given_feedback(user.id, interaction_id):
-                        # Показываем запрос на оценку
-                        keyboard = [
-                            [InlineKeyboardButton("⭐", callback_data="rating_1")]
-                            [InlineKeyboardButton("⭐⭐", callback_data="rating_2")]
-                            [InlineKeyboardButton("⭐⭐⭐", callback_data="rating_3")],
-                            [InlineKeyboardButton("⭐⭐⭐⭐", callback_data="rating_4")]
-                            [InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="rating_5")]
-                        ]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        
-                        await update.message.reply_text(
-                            f"{answer}\n\n"
-                            "📊 **Пожалуйста, оцените качество ответа:**\n"
-                            "Насколько полезной была информация? (1-5 звезд)",
-                            reply_markup=reply_markup,
-                            disable_web_page_preview=True,
-                            parse_mode="Markdown"
-                        )
-                        
-                        # Сохраняем ID взаимодействия для обратной связи
-                        context.user_data["current_interaction_id"] = interaction_id
-                    else:
-                        # Обычный ответ с кнопкой нового вопроса
-                        conversation_history = context.user_data.get('conversation_history', [])
-                        history_count = len(conversation_history)
-                        remaining = 10 - history_count
-                        
+                    if feedback_given:
+                        # Если обратная связь уже дана, показываем только кнопку нового вопроса
                         keyboard = [[InlineKeyboardButton("💬 Задать новый вопрос", callback_data="ask")]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await update.message.reply_text(
+                            answer,
+                            reply_markup=reply_markup,
+                            disable_web_page_preview=True
+                        )
+                    else:
+                        # Если обратная связь не дана, показываем обе кнопки
+                        keyboard = [
+                            [InlineKeyboardButton("💬 Задать новый вопрос", callback_data="ask")],
+                            [InlineKeyboardButton("⭐ Оценить качество ответа", callback_data=f"feedback_{interaction_id}")]
+                        ]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await update.message.reply_text(
                             answer,
@@ -691,6 +769,7 @@ application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", handle_admin_stats))
 application.add_handler(CallbackQueryHandler(ask_callback, pattern="^ask$"))
+application.add_handler(CallbackQueryHandler(handle_feedback_request, pattern="^feedback_"))
 application.add_handler(CallbackQueryHandler(handle_feedback_rating, pattern="^rating_"))
 application.add_handler(CallbackQueryHandler(handle_comment_callback, pattern="^comment$"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -711,6 +790,20 @@ def telegram_webhook(token):
 @app.route("/health")
 def health():
     return "OK"
+
+# === Очистка ресурсов при завершении ===
+import atexit
+
+def cleanup_resources():
+    """Очищает ресурсы при завершении работы"""
+    try:
+        asyncio.run(http_client.aclose())
+        logging.info("HTTP клиент закрыт")
+    except Exception as e:
+        logging.error(f"Ошибка при закрытии HTTP клиента: {e}")
+
+# Регистрируем функцию очистки
+atexit.register(cleanup_resources)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
