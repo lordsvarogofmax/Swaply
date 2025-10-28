@@ -36,7 +36,7 @@ import atexit
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct")
+MODEL = os.environ.get("OPENROUTER_MODEL", "minimax/minimax-m2:free")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "364191893"))
 
 if not BOT_TOKEN or not OPENROUTER_API_KEY:
